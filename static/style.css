@@ -1,0 +1,288 @@
+/* ================================================================
+   Hydra — Character Developer
+   ================================================================ */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #080808;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-hover: rgba(255, 255, 255, 0.18);
+  --text: #e5e5e5;
+  --text-muted: #4a4a4a;
+  --green: #10b981;
+  --green-glow: rgba(16, 185, 129, 0.25);
+  --blue: #3b82f6;
+  --blue-glow: rgba(59, 130, 246, 0.25);
+  --red: #ef4444;
+  --radius: 8px;
+  --font: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- Layout ---- */
+
+.app {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.card {
+  width: 640px;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ---- Header ---- */
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  color: #fff;
+  font-family: var(--font-mono);
+  user-select: none;
+}
+
+/* ---- Model selector ---- */
+
+.model-selector {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.model-btn {
+  padding: 4px 10px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.62rem;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: color 0.2s, background 0.2s;
+}
+.model-btn:not(:last-child) {
+  border-right: 1px solid var(--border);
+}
+.model-btn:hover {
+  color: var(--text);
+}
+.model-btn.active {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.lora-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.trigger-input {
+  width: 80px;
+  padding: 5px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  outline: none;
+  text-align: center;
+  transition: border-color 0.2s;
+}
+.trigger-input:focus { border-color: var(--border-hover); }
+
+.lora-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+}
+.lora-btn:hover {
+  color: var(--text);
+  border-color: var(--border-hover);
+}
+.lora-btn.loaded {
+  color: var(--green);
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+/* ---- LoRA status ---- */
+
+.lora-status {
+  font-size: 0.68rem;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  display: none;
+  margin-top: -8px;
+  text-align: right;
+}
+.lora-status.visible { display: block; }
+
+/* ---- Image display ---- */
+
+.image-display {
+  aspect-ratio: 1;
+  background: #0b0b0b;
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.image-display img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.placeholder {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-family: var(--font-mono);
+  user-select: none;
+}
+
+/* Loading shimmer */
+.image-display.loading .placeholder { display: none; }
+.image-display.loading::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    110deg,
+    transparent 30%,
+    rgba(255, 255, 255, 0.015) 50%,
+    transparent 70%
+  );
+  animation: shimmer 1.8s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+/* ---- Prompt bar ---- */
+
+.prompt-bar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.prompt-input {
+  flex: 1;
+  padding: 10px 14px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 0.82rem;
+  font-family: var(--font-mono);
+  outline: none;
+  transition: border-color 0.2s;
+}
+.prompt-input:focus { border-color: var(--border-hover); }
+.prompt-input::placeholder { color: var(--text-muted); }
+.prompt-input:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ---- Mode toggle ---- */
+
+.mode-toggle {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid var(--green);
+  background: transparent;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color 0.3s, box-shadow 0.3s, transform 0.15s;
+  box-shadow: 0 0 10px var(--green-glow);
+  outline: none;
+}
+
+.mode-toggle:hover { transform: scale(1.12); }
+.mode-toggle:active { transform: scale(0.95); }
+
+.mode-toggle.edit {
+  border-color: var(--blue);
+  box-shadow: 0 0 10px var(--blue-glow);
+}
+
+.mode-toggle.loading {
+  animation: pulse-toggle 1s ease-in-out infinite alternate;
+  pointer-events: none;
+}
+
+@keyframes pulse-toggle {
+  from { opacity: 0.4; }
+  to   { opacity: 1; }
+}
+
+/* ---- Error toast ---- */
+
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(80px);
+  background: #1a1a1a;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--red);
+  font-size: 0.78rem;
+  font-family: var(--font-mono);
+  padding: 10px 20px;
+  border-radius: 6px;
+  opacity: 0;
+  transition: transform 0.3s, opacity 0.3s;
+  z-index: 100;
+  pointer-events: none;
+}
+.toast.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ---- Responsive ---- */
+
+@media (max-width: 700px) {
+  .app { padding: 12px; }
+  .card { padding: 16px; gap: 12px; }
+  .title { font-size: 0.95rem; }
+}

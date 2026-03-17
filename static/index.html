@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hydra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <div class="card">
+      <div class="card-header">
+        <h1 class="title">HYDRA</h1>
+        <div class="model-selector" id="modelSelector">
+          <button class="model-btn active" data-model="deturbo">DE-TURBO</button>
+          <button class="model-btn" data-model="base">BASE</button>
+        </div>
+        <div class="lora-controls">
+          <input type="text" id="triggerWord" class="trigger-input" placeholder="trigger" value="chrx" spellcheck="false">
+          <label class="lora-btn" id="loraBtn" title="Upload LoRA (.safetensors)">
+            <input type="file" id="loraFile" accept=".safetensors" hidden>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+          </label>
+        </div>
+      </div>
+      <div class="lora-status" id="loraStatus"></div>
+      <div class="image-display" id="imageDisplay">
+        <span class="placeholder" id="placeholder">Generate an image to begin</span>
+      </div>
+      <div class="prompt-bar">
+        <input type="text" id="promptInput" class="prompt-input" placeholder="describe your character..." spellcheck="false" autocomplete="off">
+        <button class="mode-toggle" id="modeToggle" title="Generate mode (click to switch)"></button>
+      </div>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
