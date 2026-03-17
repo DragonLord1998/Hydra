@@ -283,5 +283,5 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
-    print("[Hydra] Character Developer — http://0.0.0.0:7861")
-    app.run(host="0.0.0.0", port=7861, debug=False, threaded=True)
+    print("[Hydra] Character Developer — http://0.0.0.0:7862")
+    app.run(host="0.0.0.0", port=7862, debug=False, threaded=True)
