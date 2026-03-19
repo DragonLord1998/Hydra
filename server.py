@@ -112,12 +112,12 @@ def _latents_to_preview(latents: torch.Tensor, size: int = 256) -> str | None:
             if h * w < seq_len:
                 h += 1
             usable = min(h * w, seq_len)
-            lat = latents[0, :usable, :3].float().cpu()
+            lat = latents[0, :usable, :3].detach().float().cpu()
             rows = min(h, int(usable ** 0.5) + 1)
             lat = lat.reshape(rows, -1, 3)[:h, :w, :]
         elif latents.dim() == 4:
             # Spatial format (B, C, H, W)
-            lat = latents[0, :3].float().cpu().permute(1, 2, 0)
+            lat = latents[0, :3].detach().float().cpu().permute(1, 2, 0)
         else:
             return None
 
@@ -128,7 +128,9 @@ def _latents_to_preview(latents: torch.Tensor, size: int = 256) -> str | None:
             lat = torch.full_like(lat, 0.5)
 
         rgb = (lat.numpy() * 255).clip(0, 255).astype(np.uint8)
+        del lat
         preview = Image.fromarray(rgb).resize((size, size), Image.LANCZOS)
+        del rgb
         buf = io.BytesIO()
         preview.save(buf, format="JPEG", quality=60)
         return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
@@ -174,8 +176,21 @@ def _load_zimage(variant: str = "deturbo"):
 
     from diffusers import ZImagePipeline
 
-    model_path = ZIMAGE_DETURBO_PATH if variant == "deturbo" else ZIMAGE_BASE_PATH
-    label = "De-Turbo" if variant == "deturbo" else "Foundation"
+    # Resolve model path — fall back to HuggingFace if local deturbo path missing
+    if variant == "deturbo" and os.path.isdir(ZIMAGE_DETURBO_PATH):
+        model_path = ZIMAGE_DETURBO_PATH
+        label = "De-Turbo"
+    elif variant == "deturbo":
+        model_path = ZIMAGE_BASE_PATH
+        label = "De-Turbo (fallback to Foundation weights)"
+        logger.warning(
+            "[Hydra] Local De-Turbo path %s not found — using %s from HuggingFace",
+            ZIMAGE_DETURBO_PATH, ZIMAGE_BASE_PATH,
+        )
+        print(f"[Hydra] Local De-Turbo not found at {ZIMAGE_DETURBO_PATH}, using {ZIMAGE_BASE_PATH}")
+    else:
+        model_path = ZIMAGE_BASE_PATH
+        label = "Foundation"
 
     logger.info("[Hydra] Loading Z-Image %s from %s ...", label, model_path)
     print(f"[Hydra] Loading Z-Image {label} from {model_path} ...")
@@ -184,7 +199,7 @@ def _load_zimage(variant: str = "deturbo"):
     _zimage_pipe = ZImagePipeline.from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
-        low_cpu_mem_usage=False,
+        low_cpu_mem_usage=True,
         token=HF_TOKEN,
     )
     _zimage_pipe.enable_model_cpu_offload()
@@ -214,6 +229,7 @@ def _load_qwen():
     _qwen_pipe = QwenImageEditPlusPipeline.from_pretrained(
         QWEN_EDIT_MODEL,
         torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
         token=HF_TOKEN,
     )
     _qwen_pipe.enable_model_cpu_offload()
@@ -332,10 +348,11 @@ def generate():
                     callback_on_step_end_tensor_inputs=["latents"],
                 ).images[0]
         except Exception as exc:
-            torch.cuda.empty_cache()
-            gc.collect()
             _broadcast("error", {"message": str(exc)}, priority=True)
             return jsonify({"error": f"Generation failed: {exc}"}), 500
+        finally:
+            torch.cuda.empty_cache()
+            gc.collect()
 
         filename = f"{uuid.uuid4().hex[:12]}.png"
         out = OUTPUT_DIR / filename
@@ -363,7 +380,7 @@ def edit_image():
 
         source = Image.open(_current_image_path).convert("RGB")
 
-        qwen_steps = 40
+        qwen_steps = 20
 
         def _on_edit_step(pipe, step_index, timestep, cb_kwargs):
             if (step_index + 1) % 2 == 0:
@@ -393,10 +410,12 @@ def edit_image():
                     callback_on_step_end_tensor_inputs=["latents"],
                 ).images[0]
         except Exception as exc:
-            torch.cuda.empty_cache()
-            gc.collect()
             _broadcast("error", {"message": str(exc)}, priority=True)
             return jsonify({"error": f"Edit failed: {exc}"}), 500
+        finally:
+            del source
+            torch.cuda.empty_cache()
+            gc.collect()
 
         filename = f"{uuid.uuid4().hex[:12]}.png"
         out = OUTPUT_DIR / filename
@@ -431,8 +450,7 @@ def stream():
     with _sub_lock:
         if len(_subscribers) >= MAX_SSE_CONNECTIONS:
             return Response("Too many connections", status=429)
-    q: queue.Queue = queue.Queue(maxsize=64)
-    with _sub_lock:
+        q: queue.Queue = queue.Queue(maxsize=32)
         _subscribers.append(q)
 
     def generate():
