@@ -7,7 +7,7 @@ echo "[Hydra] Installing dependencies..."
 pip install --quiet git+https://github.com/huggingface/diffusers.git
 
 # Install other deps (--ignore-installed for blinker: RunPod's system blinker lacks RECORD file)
-pip install --quiet flask torch Pillow accelerate sentencepiece --ignore-installed blinker
+pip install --quiet flask torch Pillow accelerate sentencepiece transformers --ignore-installed blinker
 
 echo "[Hydra] Starting server..."
 cd "$(dirname "$0")"
