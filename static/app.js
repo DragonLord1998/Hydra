@@ -23,6 +23,26 @@
   let currentImageUrl = null;
   let busy = false;
 
+  // Restore state from server on page load
+  fetch("/api/status").then(r => r.json()).then(data => {
+    if (data.lora) {
+      loraBtn.classList.add("loaded");
+      loraStatus.textContent = data.lora.name;
+      loraStatus.classList.add("visible");
+      if (data.lora.trigger) triggerWord.value = data.lora.trigger;
+    }
+    if (data.zimage_variant) {
+      zimageVariant = data.zimage_variant;
+      modelBtns.forEach(b => b.classList.toggle("active", b.dataset.model === zimageVariant));
+    }
+    if (data.has_image && data.mode === "edit") {
+      mode = "edit";
+      modeToggle.classList.add("edit");
+      modeToggle.title = "Edit mode (click to switch)";
+      promptInput.placeholder = "describe your edit...";
+    }
+  }).catch(() => {});
+
   // ---------------------------------------------------------------
   // Model selector (De-Turbo / Base)
   // ---------------------------------------------------------------
@@ -144,6 +164,71 @@
   }
 
   // ---------------------------------------------------------------
+  // SSE connection for live previews & model status
+  // ---------------------------------------------------------------
+
+  const stepCounter  = document.getElementById("stepCounter");
+  const stepText     = document.getElementById("stepText");
+  const loadOverlay  = document.getElementById("loadingOverlay");
+  const loadText     = document.getElementById("loadingText");
+
+  var evtSource = new EventSource("/api/stream");
+
+  function attachSSEListeners(src) {
+    src.addEventListener("preview", function (e) {
+      var data = JSON.parse(e.data);
+      if (!busy) return; // ignore stale previews
+      if (placeholder) placeholder.style.display = "none";
+
+      var img = imageDisplay.querySelector("img");
+      if (!img) {
+        img = document.createElement("img");
+        img.alt = "Preview";
+        imageDisplay.appendChild(img);
+      }
+      img.src = data.image;
+      img.classList.add("preview-img");
+
+      if (stepCounter && stepText) {
+        stepCounter.style.display = "";
+        stepText.textContent = data.step + " / " + data.total;
+      }
+    });
+
+    src.addEventListener("model_status", function (e) {
+      var data = JSON.parse(e.data);
+      if (data.action === "loading") {
+        if (loadOverlay && loadText) {
+          loadText.textContent = "Loading " + data.name + "...";
+          loadOverlay.style.display = "";
+        }
+      } else if (data.action === "ready") {
+        if (loadOverlay) loadOverlay.style.display = "none";
+      }
+    });
+
+    src.addEventListener("error", function (e) {
+      var data;
+      try { data = JSON.parse(e.data); } catch (_) { return; }
+      if (data && data.message) showToast(data.message);
+    });
+
+    // Resync state on reconnection
+    src.onopen = function () {
+      if (loadOverlay) loadOverlay.style.display = "none";
+      fetch("/api/status").then(function (r) { return r.json(); }).then(function (data) {
+        if (data.lora) {
+          loraBtn.classList.add("loaded");
+          loraStatus.textContent = data.lora.name;
+          loraStatus.classList.add("visible");
+        }
+      }).catch(function () {});
+    };
+  }
+
+  attachSSEListeners(evtSource);
+
+  // ---------------------------------------------------------------
   // Image display
   // ---------------------------------------------------------------
 
@@ -160,14 +245,16 @@
     currentImageUrl = url;
 
     if (placeholder) placeholder.style.display = "none";
+    if (stepCounter) stepCounter.style.display = "none";
 
-    let img = imageDisplay.querySelector("img");
+    var img = imageDisplay.querySelector("img");
     if (!img) {
       img = document.createElement("img");
       imageDisplay.appendChild(img);
     }
     img.src = url + "?t=" + Date.now();
     img.alt = "Generated image";
+    img.classList.remove("preview-img");
 
     // Update edit mode placeholder if needed
     if (mode === "edit" || mode === "generate") {

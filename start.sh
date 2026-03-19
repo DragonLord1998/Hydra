@@ -7,7 +7,7 @@ echo "[Hydra] Installing dependencies..."
 pip install --quiet git+https://github.com/huggingface/diffusers.git
 
 # Install other deps
-pip install --quiet flask torch Pillow accelerate sentencepiece --ignore-installed blinker
+pip install --quiet flask torch Pillow accelerate sentencepiece blinker
 
 echo "[Hydra] Starting server..."
 cd "$(dirname "$0")"

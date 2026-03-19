@@ -3,3 +3,6 @@ torch
 Pillow
 accelerate
 sentencepiece
+blinker
+# diffusers — install from git main (not PyPI) for ZImagePipeline & QwenImageEditPlusPipeline:
+# pip install git+https://github.com/huggingface/diffusers.git
