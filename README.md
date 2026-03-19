@@ -28,7 +28,8 @@ Toggle between modes by clicking the glowing circle next to the prompt bar:
 ## Quick Start
 
 ```bash
-# Single command — installs deps and starts server
+git clone https://github.com/DragonLord1998/Hydra.git
+cd Hydra
 bash start.sh
 # → http://0.0.0.0:7862
 ```
