@@ -495,6 +495,15 @@ def edit_image():
     if not instruction:
         return jsonify({"error": "Edit instruction is required"}), 400
 
+    # Allow selecting a specific source image from the canvas
+    source_image = data.get("source_image")
+    if source_image:
+        fname = Path(source_image).name
+        if re.match(r"^[a-f0-9]{12}\.png$", fname):
+            candidate = OUTPUT_DIR / fname
+            if candidate.is_file():
+                _current_image_path = str(candidate)
+
     if not _current_image_path or not os.path.isfile(_current_image_path):
         return jsonify({"error": "Generate an image first"}), 400
 

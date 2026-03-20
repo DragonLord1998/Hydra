@@ -9,9 +9,15 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <div class="app">
-    <div class="card">
-      <div class="card-header">
+  <!-- Canvas layer -->
+  <div id="canvasViewport" class="canvas-viewport">
+    <div id="canvasWorld" class="canvas-world"></div>
+  </div>
+
+  <!-- UI overlay layer -->
+  <div class="ui-overlay">
+    <div class="overlay-header">
+      <div class="header-row">
         <h1 class="title">HYDRA</h1>
         <div class="model-selector" id="modelSelector">
           <button class="model-btn active" data-model="srpo">SRPO</button>
@@ -50,21 +56,14 @@
         <div class="settings-row">
           <label class="settings-label">Steps</label>
           <div class="steps-control">
-            <input type="range" id="stepsRange" class="settings-range" min="1" max="100" value="25">
-            <span class="steps-value" id="stepsValue">25</span>
+            <input type="range" id="stepsRange" class="settings-range" min="1" max="100" value="50">
+            <span class="steps-value" id="stepsValue">50</span>
           </div>
         </div>
       </div>
       <div class="lora-status" id="loraStatus"></div>
-      <div class="image-display" id="imageDisplay">
-        <span class="placeholder" id="placeholder">Generate an image to begin</span>
-        <div class="step-counter" id="stepCounter" style="display:none;">
-          <span id="stepText">0 / 25</span>
-        </div>
-        <div class="loading-overlay" id="loadingOverlay" style="display:none;">
-          <div class="loading-text" id="loadingText">Loading model...</div>
-        </div>
-      </div>
+    </div>
+    <div class="overlay-prompt">
       <div class="prompt-bar">
         <input type="text" id="promptInput" class="prompt-input" placeholder="describe your character..." spellcheck="false" autocomplete="off">
         <label class="upload-img-btn" id="uploadImgBtn" title="Upload image to edit" style="display:none;">
