@@ -86,7 +86,7 @@
       canvasViewport.classList.add("panning");
       canvasViewport.setPointerCapture(e.pointerId);
       e.preventDefault();
-    } else if (e.button === 0 && !spaceHeld && e.target === canvasViewport) {
+    } else if (e.button === 0 && !spaceHeld && (e.target === canvasViewport || e.target === canvasWorld)) {
       // Click on empty canvas = deselect
       selectNode(null);
     }
@@ -127,13 +127,15 @@
 
   // Spacebar pan (only when prompt not focused)
   document.addEventListener("keydown", function (e) {
-    if (e.code === "Space" && document.activeElement !== promptInput) {
+    var activeTag = document.activeElement && document.activeElement.tagName;
+    if (e.code === "Space" && activeTag !== "INPUT" && activeTag !== "SELECT" && activeTag !== "TEXTAREA") {
       spaceHeld = true;
       canvasViewport.style.cursor = "grab";
       e.preventDefault();
     }
-    // Delete selected node
-    if ((e.code === "Delete" || e.code === "Backspace") && document.activeElement !== promptInput) {
+    // Delete selected node (only when no input is focused)
+    var tag = document.activeElement && document.activeElement.tagName;
+    if ((e.code === "Delete" || e.code === "Backspace") && tag !== "INPUT" && tag !== "SELECT" && tag !== "TEXTAREA") {
       if (selectedId && !busy) {
         removeNode(selectedId);
         e.preventDefault();
@@ -562,7 +564,6 @@
     busy = true;
     promptInput.disabled = true;
     modeToggle.classList.add("loading");
-    placementCounter = 0;
 
     var rParts = resolutionSelect.value.split("x");
     var w = parseInt(rParts[0], 10);
@@ -773,7 +774,7 @@
   }
 
   // Load localStorage first, then server state
-  var hadSaved = loadCanvasState();
+  loadCanvasState();
   fetch("/api/status").then(function (r) { return r.json(); }).then(restoreState).catch(function () {});
 
   // ---------------------------------------------------------------
