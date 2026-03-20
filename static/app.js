@@ -31,8 +31,11 @@
   let currentImageUrl = null;
   let busy = false;
 
-  // Restore state from server on page load
-  fetch("/api/status").then(r => r.json()).then(data => {
+  // ---------------------------------------------------------------
+  // Restore full state from server on page load
+  // ---------------------------------------------------------------
+
+  function restoreState(data) {
     if (data.lora) {
       loraBtn.classList.add("loaded");
       loraStatus.textContent = data.lora.name;
@@ -43,16 +46,33 @@
       genVariant = data.gen_variant;
       modelBtns.forEach(b => b.classList.toggle("active", b.dataset.model === genVariant));
     }
+
+    // Restore last image
+    if (data.image_url) {
+      showImage(data.image_url);
+    }
+
+    // If server is busy, show generating state
+    if (data.busy) {
+      busy = true;
+      promptInput.disabled = true;
+      modeToggle.classList.add("loading");
+      imageDisplay.classList.add("loading", "generating");
+    }
+
     if (data.has_image && data.mode === "edit") {
       mode = "edit";
       modeToggle.classList.add("edit");
       modeToggle.title = "Edit mode (click to switch)";
       promptInput.placeholder = "describe your edit...";
+      promptInput.classList.add("edit-mode");
       uploadImgBtn.style.display = "";
       resolutionRow.style.display = "none";
       syncStepsForMode("edit");
     }
-  }).catch(() => {});
+  }
+
+  fetch("/api/status").then(r => r.json()).then(restoreState).catch(() => {});
 
   // ---------------------------------------------------------------
   // Model selector (De-Turbo / Base / SRPO)
@@ -106,6 +126,7 @@
     if (busy) return;
     mode = mode === "generate" ? "edit" : "generate";
     modeToggle.classList.toggle("edit", mode === "edit");
+    promptInput.classList.toggle("edit-mode", mode === "edit");
     uploadImgBtn.style.display = mode === "edit" ? "" : "none";
     resolutionRow.style.display = mode === "edit" ? "none" : "";
     syncStepsForMode(mode);
@@ -202,7 +223,7 @@
     busy = true;
     promptInput.disabled = true;
     modeToggle.classList.add("loading");
-    imageDisplay.classList.add("loading");
+    imageDisplay.classList.add("loading", "generating");
     if (placeholder) placeholder.textContent = mode === "generate" ? "Generating..." : "Editing...";
 
     const endpoint = mode === "generate" ? "/api/generate" : "/api/edit";
@@ -233,7 +254,7 @@
       busy = false;
       promptInput.disabled = false;
       modeToggle.classList.remove("loading");
-      imageDisplay.classList.remove("loading");
+      imageDisplay.classList.remove("loading", "generating");
       promptInput.focus();
     }
   }
@@ -252,7 +273,14 @@
   function attachSSEListeners(src) {
     src.addEventListener("preview", function (e) {
       var data = JSON.parse(e.data);
-      if (!busy) return; // ignore stale previews
+      // Show previews if this tab started the job OR reconnected mid-job
+      if (!busy) {
+        // Reconnected while server is generating — pick up the preview
+        busy = true;
+        promptInput.disabled = true;
+        modeToggle.classList.add("loading");
+        imageDisplay.classList.add("loading", "generating");
+      }
       if (placeholder) placeholder.style.display = "none";
 
       var img = imageDisplay.querySelector("img");
@@ -296,6 +324,19 @@
           loraBtn.classList.add("loaded");
           loraStatus.textContent = data.lora.name;
           loraStatus.classList.add("visible");
+        }
+        // Restore image if we don't have one yet
+        if (data.image_url && !currentImageUrl) {
+          showImage(data.image_url);
+        }
+        // If server is no longer busy, clear loading state
+        if (!data.busy && busy) {
+          busy = false;
+          promptInput.disabled = false;
+          modeToggle.classList.remove("loading");
+          imageDisplay.classList.remove("loading", "generating");
+          // Fetch the final image
+          if (data.image_url) showImage(data.image_url);
         }
       }).catch(function () {});
     };

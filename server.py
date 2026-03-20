@@ -568,6 +568,9 @@ def edit_image():
 
 @app.route("/api/status")
 def status():
+    image_url = None
+    if _current_image_path and os.path.isfile(_current_image_path):
+        image_url = f"/outputs/{Path(_current_image_path).name}"
     return jsonify({
         "lora": _current_lora,
         "mode": (
@@ -576,9 +579,9 @@ def status():
             else None
         ),
         "gen_variant": _gen_variant,
-        "has_image": bool(
-            _current_image_path and os.path.isfile(_current_image_path)
-        ),
+        "has_image": image_url is not None,
+        "image_url": image_url,
+        "busy": _lock.locked(),
     })
 
 
