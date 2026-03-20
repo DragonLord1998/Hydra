@@ -605,7 +605,6 @@ def upscale_image():
             "--resolution", str(target_res),
             "--dit_offload_device", "cpu",
             "--vae_offload_device", "cpu",
-            "--sample_steps", "1",
         ]
         logger.info("[Hydra] Upscaling %s at %dp", fname, target_res)
         proc = subprocess.run(
