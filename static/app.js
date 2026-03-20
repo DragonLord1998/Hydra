@@ -552,6 +552,11 @@
       for (var i = 0; i < saved.nodes.length; i++) {
         var nd = saved.nodes[i];
         nd.el = null;
+        nd.upscaling = false;
+        // Backfill fields for nodes saved before upscale support
+        if (!nd.originalUrl) nd.originalUrl = nd.url;
+        if (!nd.originalWidth) nd.originalWidth = nd.width;
+        if (!nd.originalHeight) nd.originalHeight = nd.height;
         nodes.set(nd.id, nd);
         renderNode(nd);
       }

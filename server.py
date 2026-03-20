@@ -567,7 +567,9 @@ def edit_image():
 @require_auth
 def upscale_image():
     """Upscale an image using SeedVR2."""
+    import shutil
     import subprocess
+    import tempfile
 
     data = request.get_json(silent=True) or {}
     source = data.get("source_image")
@@ -587,63 +589,67 @@ def upscale_image():
     except (ValueError, TypeError):
         return jsonify({"error": "Invalid resolution"}), 400
 
-    out_filename = f"{uuid.uuid4().hex[:12]}.png"
-    out_path = OUTPUT_DIR / out_filename
+    if not Path(SEEDVR2_CLI).is_file():
+        return jsonify({"error": "SeedVR2 not installed"}), 500
 
     _broadcast("model_status", {"action": "loading", "name": "SeedVR2 Upscaler"}, priority=True)
 
+    # Use a temp directory for SeedVR2 output, then move result to OUTPUT_DIR
+    tmp_dir = tempfile.mkdtemp(prefix="hydra_upscale_")
     try:
         cmd = [
             "python3", str(SEEDVR2_CLI),
             str(source_path),
-            "--output", str(out_path),
+            "--output", tmp_dir,
+            "--output_format", "png",
             "--resolution", str(target_res),
             "--dit_offload_device", "cpu",
             "--vae_offload_device", "cpu",
             "--sample_steps", "1",
         ]
-        logger.info("[Hydra] Upscaling %s → %s at %dp", fname, out_filename, target_res)
-        result = subprocess.run(
+        logger.info("[Hydra] Upscaling %s at %dp", fname, target_res)
+        proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=300,
             cwd=str(Path(SEEDVR2_CLI).parent),
         )
-        if result.returncode != 0:
-            logger.error("[Hydra] SeedVR2 failed: %s", result.stderr[-500:] if result.stderr else "")
+        if proc.returncode != 0:
+            stderr = proc.stderr[-1000:] if proc.stderr else ""
+            stdout = proc.stdout[-1000:] if proc.stdout else ""
+            logger.error("[Hydra] SeedVR2 failed (rc=%d):\nstderr: %s\nstdout: %s",
+                         proc.returncode, stderr, stdout)
             _broadcast("error", {"message": "Upscale failed"}, priority=True)
             return jsonify({"error": "Upscale failed"}), 500
 
-        # SeedVR2 CLI may output to a directory or file — find the result
-        if out_path.is_file():
-            final_path = out_path
-        else:
-            # CLI sometimes creates output dir with same name
-            candidates = list(OUTPUT_DIR.glob(f"{out_filename}*"))
-            if not candidates:
-                # Check if it wrote inside a directory named after the output
-                out_dir = OUTPUT_DIR / out_filename.replace(".png", "")
-                if out_dir.is_dir():
-                    pngs = list(out_dir.glob("*.png"))
-                    if pngs:
-                        # Move first result to expected location
-                        pngs[0].rename(out_path)
-                        final_path = out_path
-                    else:
-                        return jsonify({"error": "Upscale produced no output"}), 500
-                else:
-                    return jsonify({"error": "Upscale produced no output"}), 500
-            else:
-                final_path = candidates[0]
+        # Find the output PNG — SeedVR2 creates files in the output dir
+        result_pngs = []
+        for root, _dirs, files in os.walk(tmp_dir):
+            for f in files:
+                if f.lower().endswith(".png"):
+                    result_pngs.append(Path(root) / f)
+
+        if not result_pngs:
+            logger.error("[Hydra] SeedVR2 produced no output in %s", tmp_dir)
+            _broadcast("error", {"message": "Upscale produced no output"}, priority=True)
+            return jsonify({"error": "Upscale produced no output"}), 500
+
+        # Move result to OUTPUT_DIR with a proper filename
+        out_filename = f"{uuid.uuid4().hex[:12]}.png"
+        out_path = OUTPUT_DIR / out_filename
+        shutil.move(str(result_pngs[0]), str(out_path))
 
         _broadcast("model_status", {"action": "ready", "name": "SeedVR2 Upscaler"}, priority=True)
-        return jsonify({"image_url": f"/outputs/{final_path.name}"})
+        logger.info("[Hydra] Upscale complete: %s → %s", fname, out_filename)
+        return jsonify({"image_url": f"/outputs/{out_filename}"})
 
     except subprocess.TimeoutExpired:
         _broadcast("error", {"message": "Upscale timed out"}, priority=True)
         return jsonify({"error": "Upscale timed out"}), 500
-    except Exception as exc:
+    except Exception:
         logger.exception("[Hydra] Upscale error")
         _broadcast("error", {"message": "Upscale failed"}, priority=True)
         return jsonify({"error": "Upscale failed"}), 500
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 @app.route("/api/status")
