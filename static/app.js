@@ -68,6 +68,7 @@
   var panStart = { x: 0, y: 0 };
   var spaceHeld = false;
   var dragging = null;
+  var resizing = null; // { nodeId, corner, startX, startY, startW, startH, startNodeX, startNodeY }
 
   canvasViewport.addEventListener("wheel", function (e) {
     e.preventDefault();
@@ -100,6 +101,56 @@
       camera.x = e.clientX - panStart.x;
       camera.y = e.clientY - panStart.y;
       applyCameraTransform();
+      return;
+    }
+    if (resizing) {
+      var world = screenToWorld(e.clientX, e.clientY);
+      var node = nodes.get(resizing.nodeId);
+      if (!node) return;
+      var dx = world.x - resizing.startX;
+      var dy = world.y - resizing.startY;
+      var c = resizing.corner;
+      // Use the larger delta to maintain aspect ratio
+      var delta;
+      if (c === "se") delta = Math.max(dx, dy / resizing.aspect * resizing.aspect);
+      else if (c === "sw") delta = Math.max(-dx, dy / resizing.aspect * resizing.aspect);
+      else if (c === "ne") delta = Math.max(dx, -dy / resizing.aspect * resizing.aspect);
+      else delta = Math.max(-dx, -dy / resizing.aspect * resizing.aspect);
+      // Compute new size preserving aspect ratio
+      var newW, newH;
+      if (c === "se") {
+        newW = Math.max(80, resizing.startW + dx);
+        newH = newW / resizing.aspect;
+      } else if (c === "sw") {
+        newW = Math.max(80, resizing.startW - dx);
+        newH = newW / resizing.aspect;
+      } else if (c === "ne") {
+        newW = Math.max(80, resizing.startW + dx);
+        newH = newW / resizing.aspect;
+      } else { // nw
+        newW = Math.max(80, resizing.startW - dx);
+        newH = newW / resizing.aspect;
+      }
+      // Adjust position so the opposite corner stays fixed
+      if (c === "nw") {
+        node.x = resizing.startNodeX + (resizing.startW - newW) / 2;
+        node.y = resizing.startNodeY + (resizing.startH - newH) / 2;
+      } else if (c === "ne") {
+        node.x = resizing.startNodeX + (newW - resizing.startW) / 2;
+        node.y = resizing.startNodeY + (resizing.startH - newH) / 2;
+      } else if (c === "sw") {
+        node.x = resizing.startNodeX + (resizing.startW - newW) / 2;
+        node.y = resizing.startNodeY + (newH - resizing.startH) / 2;
+      } else { // se
+        node.x = resizing.startNodeX + (newW - resizing.startW) / 2;
+        node.y = resizing.startNodeY + (newH - resizing.startH) / 2;
+      }
+      node.width = newW;
+      node.height = newH;
+      node.el.style.width = newW + "px";
+      node.el.style.height = newH + "px";
+      node.el.style.transform = "translate(" + (node.x - newW / 2) + "px," + (node.y - newH / 2) + "px)";
+      return;
     }
     if (dragging) {
       var world = screenToWorld(e.clientX, e.clientY);
@@ -117,6 +168,10 @@
     if (isPanning) {
       isPanning = false;
       canvasViewport.classList.remove("panning");
+      saveCanvasState();
+    }
+    if (resizing) {
+      resizing = null;
       saveCanvasState();
     }
     if (dragging) {
@@ -255,9 +310,33 @@
       el.classList.add(mode === "edit" ? "edit-selected" : "selected");
     }
 
+    // Resize handles (4 corners)
+    ["nw", "ne", "sw", "se"].forEach(function (corner) {
+      var handle = document.createElement("div");
+      handle.className = "node-resize-handle handle-" + corner;
+      handle.addEventListener("pointerdown", function (e) {
+        if (e.button !== 0 || spaceHeld) return;
+        e.stopPropagation();
+        var world = screenToWorld(e.clientX, e.clientY);
+        resizing = {
+          nodeId: node.id,
+          corner: corner,
+          startX: world.x,
+          startY: world.y,
+          startW: node.width,
+          startH: node.height,
+          startNodeX: node.x,
+          startNodeY: node.y,
+          aspect: node.width / node.height,
+        };
+        canvasViewport.setPointerCapture(e.pointerId);
+      });
+      el.appendChild(handle);
+    });
+
     // Node drag/select
     el.addEventListener("pointerdown", function (e) {
-      if (e.button === 0 && !spaceHeld) {
+      if (e.button === 0 && !spaceHeld && !resizing) {
         e.stopPropagation();
         var world = screenToWorld(e.clientX, e.clientY);
         dragging = {
