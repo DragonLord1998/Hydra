@@ -37,14 +37,13 @@ app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2 GB upload limit
 # ---------------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).parent
-LORA_DIR = BASE_DIR / "loras"
-OUTPUT_DIR = BASE_DIR / "outputs"
+LORA_DIR = Path(os.environ.get("LORA_DIR", str(BASE_DIR / "loras")))
+OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", str(BASE_DIR / "outputs")))
 LORA_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-ZIMAGE_DETURBO_PATH = os.environ.get("ZIMAGE_DETURBO_PATH", "/workspace/models/z_image")
 ZIMAGE_BASE_PATH = os.environ.get("ZIMAGE_BASE_PATH", "Tongyi-MAI/Z-Image")
-SRPO_MODEL_PATH = os.environ.get("SRPO_MODEL_PATH", "rockerBOO/flux.1-dev-SRPO")
+SRPO_MODEL_PATH = os.environ.get("SRPO_MODEL_PATH", "vladmandic/flux.1-dev-SRPO")
 QWEN_EDIT_MODEL = os.environ.get("QWEN_EDIT_MODEL", "Qwen/Qwen-Image-Edit-2511")
 TAESD_MODEL = os.environ.get("TAESD_MODEL", "madebyollin/taef1")
 HF_TOKEN = os.environ.get("HF_TOKEN")
@@ -66,7 +65,6 @@ def require_auth(f):
 
 # Model presets: steps, guidance_scale, cfg_normalization, pipeline type
 MODEL_PRESETS = {
-    "deturbo": {"steps": 25, "cfg": 2.5, "cfg_norm": True,  "pipeline": "zimage"},
     "base":    {"steps": 50, "cfg": 4.0, "cfg_norm": False, "pipeline": "zimage"},
     "srpo":    {"steps": 50, "cfg": 3.5, "cfg_norm": False, "pipeline": "flux"},
 }
@@ -263,23 +261,11 @@ def _load_gen(variant: str = "deturbo"):
             token=HF_TOKEN,
         )
     else:
-        # Z-Image (deturbo or base)
+        # Z-Image (base/foundation)
         from diffusers import ZImagePipeline
 
-        if variant == "deturbo" and os.path.isdir(ZIMAGE_DETURBO_PATH):
-            model_path = ZIMAGE_DETURBO_PATH
-            label = "De-Turbo"
-        elif variant == "deturbo":
-            model_path = ZIMAGE_BASE_PATH
-            label = "De-Turbo (fallback to Foundation weights)"
-            logger.warning(
-                "[Hydra] Local De-Turbo path %s not found — using %s from HuggingFace",
-                ZIMAGE_DETURBO_PATH, ZIMAGE_BASE_PATH,
-            )
-            print(f"[Hydra] Local De-Turbo not found at {ZIMAGE_DETURBO_PATH}, using {ZIMAGE_BASE_PATH}")
-        else:
-            model_path = ZIMAGE_BASE_PATH
-            label = "Foundation"
+        model_path = ZIMAGE_BASE_PATH
+        label = "Foundation"
 
         logger.info("[Hydra] Loading Z-Image %s from %s ...", label, model_path)
         print(f"[Hydra] Loading Z-Image {label} from {model_path} ...")
@@ -431,9 +417,9 @@ def generate():
     if not prompt:
         return jsonify({"error": "Prompt is required"}), 400
 
-    variant = data.get("model", "deturbo")
+    variant = data.get("model", "srpo")
     if variant not in MODEL_PRESETS:
-        variant = "deturbo"
+        variant = "srpo"
 
     preset = MODEL_PRESETS[variant]
     seed = data.get("seed", int(time.time()) % (2**32))

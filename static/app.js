@@ -27,7 +27,7 @@
 
   // --- State ---
   let mode = "generate";        // "generate" | "edit"
-  let genVariant = "deturbo"; // "deturbo" | "base" | "srpo"
+  let genVariant = "srpo"; // "srpo" | "base"
   let currentImageUrl = null;
   let busy = false;
 
@@ -103,7 +103,7 @@
 
   // Sync default steps when switching model variant or mode
   function syncDefaultSteps(variant) {
-    var defaults = { deturbo: 25, base: 50, srpo: 50 };
+    var defaults = { srpo: 50, base: 50 };
     stepsRange.value = defaults[variant] || 25;
     stepsValue.textContent = stepsRange.value;
   }
@@ -112,7 +112,7 @@
     if (m === "edit") {
       stepsRange.value = 20;
     } else {
-      var defaults = { deturbo: 25, base: 50, srpo: 50 };
+      var defaults = { srpo: 50, base: 50 };
       stepsRange.value = defaults[genVariant] || 25;
     }
     stepsValue.textContent = stepsRange.value;
