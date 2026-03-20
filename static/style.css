@@ -132,6 +132,24 @@ html, body {
 .handle-sw { bottom: -4px; left: -4px; cursor: sw-resize; }
 .handle-se { bottom: -4px; right: -4px; cursor: se-resize; }
 
+/* Upscaled badge */
+.node-upscale-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  background: rgba(16, 185, 129, 0.8);
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  padding: 2px 7px;
+  border-radius: 4px;
+  z-index: 4;
+  pointer-events: none;
+  backdrop-filter: blur(4px);
+}
+
 .canvas-node img {
   display: block;
   width: 100%;

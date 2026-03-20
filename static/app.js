@@ -315,6 +315,14 @@
       el.appendChild(ph);
     }
 
+    // Show upscale badge if image was previously upscaled
+    if (node.url && node.originalUrl && node.url !== node.originalUrl) {
+      var badge = document.createElement("div");
+      badge.className = "node-upscale-badge";
+      badge.textContent = "UPSCALED";
+      el.appendChild(badge);
+    }
+
     if (node.state === "generating") el.classList.add("generating");
     if (selectedId === node.id) {
       el.classList.add(mode === "edit" ? "edit-selected" : "selected");
@@ -461,6 +469,14 @@
         if (img) {
           img.src = data.image_url + "?t=" + Date.now();
         }
+        // Add or update upscale badge
+        var badge = node.el.querySelector(".node-upscale-badge");
+        if (!badge) {
+          badge = document.createElement("div");
+          badge.className = "node-upscale-badge";
+          node.el.appendChild(badge);
+        }
+        badge.textContent = "UPSCALED " + targetRes + "p";
         showToast("Upscaled to " + targetRes + "p");
       } else {
         showToast(data.error || "Upscale failed");
