@@ -171,7 +171,13 @@
       saveCanvasState();
     }
     if (resizing) {
+      var resizedNode = nodes.get(resizing.nodeId);
       resizing = null;
+      // Trigger upscale if resized significantly larger than original
+      if (resizedNode && resizedNode.url && !resizedNode.upscaling &&
+          resizedNode.width > resizedNode.originalWidth * 1.5) {
+        triggerUpscale(resizedNode);
+      }
       saveCanvasState();
     }
     if (dragging) {
@@ -276,6 +282,10 @@
       seed: opts.seed || null,
       timestamp: Date.now(),
       state: opts.state || "generating",
+      originalUrl: opts.url || null,
+      originalWidth: opts.width || 340,
+      originalHeight: opts.height || 340,
+      upscaling: false,
       el: null,
     };
 
@@ -420,6 +430,51 @@
   }
 
   // ---------------------------------------------------------------
+  // SeedVR2 Upscale
+  // ---------------------------------------------------------------
+
+  async function triggerUpscale(node) {
+    if (!node.originalUrl || node.upscaling) return;
+    node.upscaling = true;
+
+    // Compute target resolution based on how much larger the node is
+    var scale = node.width / node.originalWidth;
+    var targetRes = Math.round(Math.min(scale * 1024, 4096));
+
+    showNodeLoading(node, "Upscaling...");
+
+    try {
+      var resp = await fetch("/api/upscale", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source_image: node.originalUrl,
+          resolution: targetRes,
+        }),
+      });
+      var data = await resp.json();
+
+      if (resp.ok && data.image_url) {
+        // Keep original reference, update displayed image
+        node.url = data.image_url;
+        var img = node.el.querySelector("img");
+        if (img) {
+          img.src = data.image_url + "?t=" + Date.now();
+        }
+        showToast("Upscaled to " + targetRes + "p");
+      } else {
+        showToast(data.error || "Upscale failed");
+      }
+    } catch (err) {
+      showToast("Upscale failed: " + err.message);
+    } finally {
+      node.upscaling = false;
+      hideNodeLoading(node);
+      saveCanvasState();
+    }
+  }
+
+  // ---------------------------------------------------------------
   // Viewport culling
   // ---------------------------------------------------------------
 
@@ -462,6 +517,8 @@
         prompt: n.prompt, mode: n.mode, model: n.model,
         parentId: n.parentId, seed: n.seed, timestamp: n.timestamp,
         state: n.state,
+        originalUrl: n.originalUrl, originalWidth: n.originalWidth,
+        originalHeight: n.originalHeight,
       });
     });
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch (_) {}
@@ -695,8 +752,11 @@
 
       if (resp.ok && data.image_url) {
         newNode.url = data.image_url;
+        newNode.originalUrl = data.image_url;
         newNode.seed = data.seed || null;
         newNode.state = "complete";
+        newNode.originalWidth = newNode.width;
+        newNode.originalHeight = newNode.height;
 
         var img = newNode.el.querySelector("img");
         if (!img) {
