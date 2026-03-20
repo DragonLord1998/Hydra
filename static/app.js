@@ -16,10 +16,18 @@
   const loraStatus   = document.getElementById("loraStatus");
 
   const modelBtns    = document.querySelectorAll(".model-btn");
+  const settingsBtn  = document.getElementById("settingsBtn");
+  const settingsPanel = document.getElementById("settingsPanel");
+  const resolutionSelect = document.getElementById("resolutionSelect");
+  const resolutionRow = document.getElementById("resolutionRow");
+  const stepsRange   = document.getElementById("stepsRange");
+  const stepsValue   = document.getElementById("stepsValue");
+  const uploadImgBtn = document.getElementById("uploadImgBtn");
+  const imageFile    = document.getElementById("imageFile");
 
   // --- State ---
   let mode = "generate";        // "generate" | "edit"
-  let zimageVariant = "deturbo"; // "deturbo" | "base"
+  let genVariant = "deturbo"; // "deturbo" | "base" | "srpo"
   let currentImageUrl = null;
   let busy = false;
 
@@ -31,29 +39,64 @@
       loraStatus.classList.add("visible");
       if (data.lora.trigger) triggerWord.value = data.lora.trigger;
     }
-    if (data.zimage_variant) {
-      zimageVariant = data.zimage_variant;
-      modelBtns.forEach(b => b.classList.toggle("active", b.dataset.model === zimageVariant));
+    if (data.gen_variant) {
+      genVariant = data.gen_variant;
+      modelBtns.forEach(b => b.classList.toggle("active", b.dataset.model === genVariant));
     }
     if (data.has_image && data.mode === "edit") {
       mode = "edit";
       modeToggle.classList.add("edit");
       modeToggle.title = "Edit mode (click to switch)";
       promptInput.placeholder = "describe your edit...";
+      uploadImgBtn.style.display = "";
+      resolutionRow.style.display = "none";
+      syncStepsForMode("edit");
     }
   }).catch(() => {});
 
   // ---------------------------------------------------------------
-  // Model selector (De-Turbo / Base)
+  // Model selector (De-Turbo / Base / SRPO)
   // ---------------------------------------------------------------
 
   modelBtns.forEach(btn => {
     btn.addEventListener("click", () => {
       if (busy) return;
-      zimageVariant = btn.dataset.model;
+      genVariant = btn.dataset.model;
       modelBtns.forEach(b => b.classList.toggle("active", b === btn));
+      if (mode === "generate") syncDefaultSteps(genVariant);
     });
   });
+
+  // ---------------------------------------------------------------
+  // Settings panel
+  // ---------------------------------------------------------------
+
+  settingsBtn.addEventListener("click", () => {
+    const open = settingsPanel.style.display !== "none";
+    settingsPanel.style.display = open ? "none" : "";
+    settingsBtn.classList.toggle("active", !open);
+  });
+
+  stepsRange.addEventListener("input", () => {
+    stepsValue.textContent = stepsRange.value;
+  });
+
+  // Sync default steps when switching model variant or mode
+  function syncDefaultSteps(variant) {
+    var defaults = { deturbo: 25, base: 50, srpo: 50 };
+    stepsRange.value = defaults[variant] || 25;
+    stepsValue.textContent = stepsRange.value;
+  }
+
+  function syncStepsForMode(m) {
+    if (m === "edit") {
+      stepsRange.value = 20;
+    } else {
+      var defaults = { deturbo: 25, base: 50, srpo: 50 };
+      stepsRange.value = defaults[genVariant] || 25;
+    }
+    stepsValue.textContent = stepsRange.value;
+  }
 
   // ---------------------------------------------------------------
   // Mode toggle
@@ -63,6 +106,9 @@
     if (busy) return;
     mode = mode === "generate" ? "edit" : "generate";
     modeToggle.classList.toggle("edit", mode === "edit");
+    uploadImgBtn.style.display = mode === "edit" ? "" : "none";
+    resolutionRow.style.display = mode === "edit" ? "none" : "";
+    syncStepsForMode(mode);
 
     if (mode === "generate") {
       modeToggle.title = "Generate mode (click to switch)";
@@ -71,7 +117,7 @@
       modeToggle.title = "Edit mode (click to switch)";
       promptInput.placeholder = currentImageUrl
         ? "describe your edit..."
-        : "generate an image first...";
+        : "upload or generate an image first...";
     }
   });
 
@@ -107,6 +153,33 @@
   });
 
   // ---------------------------------------------------------------
+  // Image upload (for edit mode)
+  // ---------------------------------------------------------------
+
+  imageFile.addEventListener("change", async () => {
+    const file = imageFile.files[0];
+    if (!file) return;
+
+    const fd = new FormData();
+    fd.append("image", file);
+
+    try {
+      const resp = await fetch("/api/upload-image", { method: "POST", body: fd });
+      const data = await resp.json();
+      if (resp.ok && data.image_url) {
+        showImage(data.image_url);
+        promptInput.placeholder = "describe your edit...";
+      } else {
+        showToast(data.error || "Upload failed");
+      }
+    } catch (err) {
+      showToast("Upload failed: " + err.message);
+    }
+
+    imageFile.value = "";
+  });
+
+  // ---------------------------------------------------------------
   // Prompt submission
   // ---------------------------------------------------------------
 
@@ -122,7 +195,7 @@
     if (!prompt || busy) return;
 
     if (mode === "edit" && !currentImageUrl) {
-      showToast("Generate an image first");
+      showToast("Upload or generate an image first");
       return;
     }
 
@@ -133,9 +206,11 @@
     if (placeholder) placeholder.textContent = mode === "generate" ? "Generating..." : "Editing...";
 
     const endpoint = mode === "generate" ? "/api/generate" : "/api/edit";
+    const [w, h] = resolutionSelect.value.split("x").map(Number);
+    const steps = parseInt(stepsRange.value, 10);
     const payload = mode === "generate"
-      ? { prompt, model: zimageVariant }
-      : { prompt };
+      ? { prompt, model: genVariant, width: w, height: h, steps: steps }
+      : { prompt, steps: steps };
 
     try {
       const resp = await fetch(endpoint, {

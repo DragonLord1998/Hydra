@@ -140,6 +140,115 @@ html, body {
   border-color: rgba(16, 185, 129, 0.3);
 }
 
+/* ---- Settings button ---- */
+
+.settings-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+}
+.settings-btn:hover {
+  color: var(--text);
+  border-color: var(--border-hover);
+}
+.settings-btn.active {
+  color: var(--text);
+  border-color: var(--border-hover);
+}
+
+/* ---- Settings panel ---- */
+
+.settings-panel {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: -8px;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-label {
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.settings-select {
+  padding: 5px 8px;
+  background: #111;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+.settings-select:focus { border-color: var(--border-hover); }
+
+.steps-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 140px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  outline: none;
+}
+.settings-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text);
+  cursor: pointer;
+  border: none;
+}
+.settings-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text);
+  cursor: pointer;
+  border: none;
+}
+
+.steps-value {
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  color: var(--text);
+  min-width: 24px;
+  text-align: right;
+}
+
 /* ---- LoRA status ---- */
 
 .lora-status {
@@ -155,7 +264,7 @@ html, body {
 /* ---- Image display ---- */
 
 .image-display {
-  aspect-ratio: 1;
+  min-height: 320px;
   background: #0b0b0b;
   border-radius: 6px;
   overflow: hidden;
@@ -166,8 +275,8 @@ html, body {
 }
 
 .image-display img {
-  width: 100%;
-  height: 100%;
+  max-width: 100%;
+  max-height: 80vh;
   object-fit: contain;
 }
 
@@ -268,6 +377,26 @@ html, body {
 .prompt-input:focus { border-color: var(--border-hover); }
 .prompt-input::placeholder { color: var(--text-muted); }
 .prompt-input:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ---- Upload image button ---- */
+
+.upload-img-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.2s, border-color 0.2s;
+}
+.upload-img-btn:hover {
+  color: var(--blue);
+  border-color: rgba(59, 130, 246, 0.3);
+}
 
 /* ---- Mode toggle ---- */
 

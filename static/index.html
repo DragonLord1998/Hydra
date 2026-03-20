@@ -16,6 +16,7 @@
         <div class="model-selector" id="modelSelector">
           <button class="model-btn active" data-model="deturbo">DE-TURBO</button>
           <button class="model-btn" data-model="base">BASE</button>
+          <button class="model-btn" data-model="srpo">SRPO</button>
         </div>
         <div class="lora-controls">
           <input type="text" id="triggerWord" class="trigger-input" placeholder="trigger" value="chrx" spellcheck="false">
@@ -27,6 +28,32 @@
               <line x1="12" y1="3" x2="12" y2="15"/>
             </svg>
           </label>
+          <button class="settings-btn" id="settingsBtn" title="Settings">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="settings-panel" id="settingsPanel" style="display:none;">
+        <div class="settings-row" id="resolutionRow">
+          <label class="settings-label">Resolution</label>
+          <select class="settings-select" id="resolutionSelect">
+            <option value="512x512">512 x 512</option>
+            <option value="768x768">768 x 768</option>
+            <option value="1024x1024" selected>1024 x 1024</option>
+            <option value="1024x1536">1024 x 1536</option>
+            <option value="1536x1024">1536 x 1024</option>
+            <option value="1536x1536">1536 x 1536</option>
+          </select>
+        </div>
+        <div class="settings-row">
+          <label class="settings-label">Steps</label>
+          <div class="steps-control">
+            <input type="range" id="stepsRange" class="settings-range" min="1" max="100" value="25">
+            <span class="steps-value" id="stepsValue">25</span>
+          </div>
         </div>
       </div>
       <div class="lora-status" id="loraStatus"></div>
@@ -41,6 +68,14 @@
       </div>
       <div class="prompt-bar">
         <input type="text" id="promptInput" class="prompt-input" placeholder="describe your character..." spellcheck="false" autocomplete="off">
+        <label class="upload-img-btn" id="uploadImgBtn" title="Upload image to edit" style="display:none;">
+          <input type="file" id="imageFile" accept="image/png,image/jpeg,image/webp" hidden>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+            <circle cx="8.5" cy="8.5" r="1.5"/>
+            <polyline points="21 15 16 10 5 21"/>
+          </svg>
+        </label>
         <button class="mode-toggle" id="modeToggle" title="Generate mode (click to switch)"></button>
       </div>
     </div>
