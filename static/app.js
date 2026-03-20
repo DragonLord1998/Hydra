@@ -21,6 +21,9 @@
   var resolutionRow  = document.getElementById("resolutionRow");
   var stepsRange     = document.getElementById("stepsRange");
   var stepsValue     = document.getElementById("stepsValue");
+  var cfgRange       = document.getElementById("cfgRange");
+  var cfgValue       = document.getElementById("cfgValue");
+  var cfgRow         = document.getElementById("cfgRow");
   var uploadImgBtn   = document.getElementById("uploadImgBtn");
   var imageFile      = document.getElementById("imageFile");
 
@@ -434,10 +437,17 @@
     stepsValue.textContent = stepsRange.value;
   });
 
+  cfgRange.addEventListener("input", function () {
+    cfgValue.textContent = cfgRange.value;
+  });
+
   function syncDefaultSteps(variant) {
     var defaults = { srpo: 50, base: 50 };
     stepsRange.value = defaults[variant] || 50;
     stepsValue.textContent = stepsRange.value;
+    var cfgDefaults = { srpo: 3.5, base: 4.0 };
+    cfgRange.value = cfgDefaults[variant] || 3.5;
+    cfgValue.textContent = cfgRange.value;
   }
 
   function syncStepsForMode(m) {
@@ -461,6 +471,7 @@
     promptInput.classList.toggle("edit-mode", mode === "edit");
     uploadImgBtn.style.display = mode === "edit" ? "" : "none";
     resolutionRow.style.display = mode === "edit" ? "none" : "";
+    cfgRow.style.display = mode === "edit" ? "none" : "";
     syncStepsForMode(mode);
 
     // Update node selection styling
@@ -589,9 +600,10 @@
     generatingId = newNode.id;
     selectNode(newNode.id);
 
+    var cfg = parseFloat(cfgRange.value);
     var endpoint = mode === "generate" ? "/api/generate" : "/api/edit";
     var payload = mode === "generate"
-      ? { prompt: prompt, model: genVariant, width: w, height: h, steps: steps }
+      ? { prompt: prompt, model: genVariant, width: w, height: h, steps: steps, cfg: cfg }
       : { prompt: prompt, steps: steps, source_image: selectedUrl };
 
     try {
@@ -769,6 +781,7 @@
       promptInput.placeholder = "describe your edit...";
       uploadImgBtn.style.display = "";
       resolutionRow.style.display = "none";
+      cfgRow.style.display = "none";
       syncStepsForMode("edit");
     }
   }

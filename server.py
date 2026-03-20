@@ -429,8 +429,9 @@ def generate():
         width = min(max(int(data.get("width", 1024)), 256), 2048)
         height = min(max(int(data.get("height", 1024)), 256), 2048)
         total_steps = min(max(int(data.get("steps", preset["steps"])), 1), 100)
+        guidance = min(max(float(data.get("cfg", preset["cfg"])), 0), 20)
     except (ValueError, TypeError):
-        return jsonify({"error": "Invalid width, height, or steps value"}), 400
+        return jsonify({"error": "Invalid width, height, steps, or cfg value"}), 400
 
     with _lock:
         _load_gen(variant)
@@ -458,7 +459,7 @@ def generate():
             height=height,
             width=width,
             num_inference_steps=total_steps,
-            guidance_scale=preset["cfg"],
+            guidance_scale=guidance,
             generator=generator,
             callback_on_step_end=_on_step,
             callback_on_step_end_tensor_inputs=["latents"],
