@@ -81,6 +81,8 @@ _qwen_pipe = None
 _taesd = None                           # AutoencoderTiny for live previews
 _current_lora: dict | None = None       # {"path", "name", "trigger"}
 _current_image_path: str | None = None  # last generated/edited image
+_sam3d_estimator = None                 # SAM3DBodyEstimator
+_anypose_loaded = False                 # whether AnyPose LoRAs are on Qwen
 
 # SSE subscribers
 _subscribers: list[queue.Queue] = []
@@ -207,6 +209,122 @@ def _raw_latents_preview(latents: torch.Tensor, size: int = 256) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# MHR70 skeleton — SAM 3D Body joint definitions
+# ---------------------------------------------------------------------------
+
+MHR70_NAMES = [
+    "nose", "left-eye", "right-eye", "left-ear", "right-ear",
+    "left-shoulder", "right-shoulder", "left-elbow", "right-elbow",
+    "left-hip", "right-hip", "left-knee", "right-knee",
+    "left-ankle", "right-ankle", "left-big-toe-tip", "left-small-toe-tip",
+    "left-heel", "right-big-toe-tip", "right-small-toe-tip", "right-heel",
+    "right-thumb-tip", "right-thumb-first-joint", "right-thumb-second-joint",
+    "right-thumb-third-joint", "right-index-tip", "right-index-first-joint",
+    "right-index-second-joint", "right-index-third-joint", "right-middle-tip",
+    "right-middle-first-joint", "right-middle-second-joint",
+    "right-middle-third-joint", "right-ring-tip", "right-ring-first-joint",
+    "right-ring-second-joint", "right-ring-third-joint", "right-pinky-tip",
+    "right-pinky-first-joint", "right-pinky-second-joint",
+    "right-pinky-third-joint", "right-wrist", "left-thumb-tip",
+    "left-thumb-first-joint", "left-thumb-second-joint",
+    "left-thumb-third-joint", "left-index-tip", "left-index-first-joint",
+    "left-index-second-joint", "left-index-third-joint", "left-middle-tip",
+    "left-middle-first-joint", "left-middle-second-joint",
+    "left-middle-third-joint", "left-ring-tip", "left-ring-first-joint",
+    "left-ring-second-joint", "left-ring-third-joint", "left-pinky-tip",
+    "left-pinky-first-joint", "left-pinky-second-joint",
+    "left-pinky-third-joint", "left-wrist", "left-olecranon",
+    "right-olecranon", "left-cubital-fossa", "right-cubital-fossa",
+    "left-acromion", "right-acromion", "neck",
+]
+
+# Major body bones (excluding fingers for the pose editor)
+MHR70_BODY_BONES = [
+    (0, 69),   # nose → neck
+    (69, 5),   # neck → left-shoulder
+    (69, 6),   # neck → right-shoulder
+    (5, 7),    # left-shoulder → left-elbow
+    (6, 8),    # right-shoulder → right-elbow
+    (7, 62),   # left-elbow → left-wrist
+    (8, 41),   # right-elbow → right-wrist
+    (69, 9),   # neck → left-hip (via spine)
+    (69, 10),  # neck → right-hip (via spine)
+    (9, 11),   # left-hip → left-knee
+    (10, 12),  # right-hip → right-knee
+    (11, 13),  # left-knee → left-ankle
+    (12, 14),  # right-knee → right-ankle
+    (13, 15),  # left-ankle → left-big-toe
+    (14, 18),  # right-ankle → right-big-toe
+    (9, 10),   # left-hip → right-hip (pelvis)
+    (5, 6),    # left-shoulder → right-shoulder
+]
+
+# Joints that are draggable in the pose editor (major body joints)
+MHR70_DRAGGABLE = [0, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 41, 62, 69]
+
+# IK chains: (root, mid, end) — for two-bone IK solving
+MHR70_IK_CHAINS = [
+    (5, 7, 62),   # left arm: shoulder → elbow → wrist
+    (6, 8, 41),   # right arm: shoulder → elbow → wrist
+    (9, 11, 13),  # left leg: hip → knee → ankle
+    (10, 12, 14), # right leg: hip → knee → ankle
+]
+
+SAM3D_CHECKPOINT = os.environ.get(
+    "SAM3D_CHECKPOINT", "facebook/sam-3d-body-dinov3"
+)
+
+
+# ---------------------------------------------------------------------------
+# SAM 3D Body — pose extraction
+# ---------------------------------------------------------------------------
+
+def _load_sam3d():
+    global _sam3d_estimator
+    if _sam3d_estimator is not None:
+        return
+
+    _unload_gen()
+    _unload_qwen()
+
+    try:
+        from sam_3d_body import load_sam_3d_body, SAM3DBodyEstimator
+    except ImportError:
+        logger.warning("[Hydra] sam_3d_body not installed — pose extraction unavailable")
+        raise RuntimeError("SAM 3D Body not installed. pip install sam-3d-body")
+
+    logger.info("[Hydra] Loading SAM 3D Body from %s ...", SAM3D_CHECKPOINT)
+    _broadcast("model_status", {"action": "loading", "name": "SAM 3D Body"}, priority=True)
+
+    ckpt_dir = Path(SAM3D_CHECKPOINT)
+    if not ckpt_dir.is_dir():
+        # HuggingFace download
+        from huggingface_hub import snapshot_download
+        ckpt_dir = Path(snapshot_download(SAM3D_CHECKPOINT, token=HF_TOKEN))
+
+    ckpt_path = ckpt_dir / "model.ckpt"
+    mhr_path = ckpt_dir / "assets" / "mhr_model.pt"
+
+    model, model_cfg = load_sam_3d_body(
+        str(ckpt_path), device=DEVICE, mhr_path=str(mhr_path),
+    )
+    _sam3d_estimator = SAM3DBodyEstimator(model, model_cfg)
+
+    print("[Hydra] SAM 3D Body ready.")
+    _broadcast("model_status", {"action": "ready", "name": "SAM 3D Body"}, priority=True)
+
+
+def _unload_sam3d():
+    global _sam3d_estimator
+    if _sam3d_estimator is not None:
+        del _sam3d_estimator
+        _sam3d_estimator = None
+        torch.cuda.empty_cache()
+        gc.collect()
+        logger.info("[Hydra] SAM 3D Body unloaded.")
+
+
+# ---------------------------------------------------------------------------
 # Model lifecycle
 # ---------------------------------------------------------------------------
 
@@ -222,10 +340,11 @@ def _unload_gen():
 
 
 def _unload_qwen():
-    global _qwen_pipe
+    global _qwen_pipe, _anypose_loaded
     if _qwen_pipe is not None:
         del _qwen_pipe
         _qwen_pipe = None
+        _anypose_loaded = False
         torch.cuda.empty_cache()
         gc.collect()
         logger.info("[Hydra] Qwen-Image-Edit pipeline unloaded.")
@@ -241,6 +360,7 @@ def _load_gen(variant: str = "deturbo"):
     # Need a different variant — unload current
     _unload_gen()
     _unload_qwen()
+    _unload_sam3d()
 
     preset = MODEL_PRESETS[variant]
 
@@ -296,6 +416,7 @@ def _load_qwen():
         return
 
     _unload_gen()
+    _unload_sam3d()
 
     from diffusers import QwenImageEditPlusPipeline
 
@@ -649,6 +770,184 @@ def upscale_image():
         return jsonify({"error": "Upscale failed"}), 500
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+@app.route("/api/extract-pose", methods=["POST"])
+@require_auth
+def extract_pose():
+    """Extract 3D human pose from an image using SAM 3D Body."""
+    data = request.get_json(silent=True) or {}
+    source = data.get("source_image")
+    if not source:
+        return jsonify({"error": "source_image is required"}), 400
+
+    fname = Path(source).name
+    if not re.match(r"^[a-f0-9]{12}\.png$", fname):
+        return jsonify({"error": "Invalid source image"}), 400
+
+    source_path = OUTPUT_DIR / fname
+    if not source_path.is_file():
+        return jsonify({"error": "Source image not found"}), 400
+
+    with _lock:
+        try:
+            _load_sam3d()
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 500
+
+        try:
+            outputs = _sam3d_estimator.process_one_image(
+                str(source_path), bbox_thr=0.5, use_mask=True,
+            )
+        except Exception:
+            logger.exception("[Hydra] Pose extraction failed")
+            _broadcast("error", {"message": "Pose extraction failed"}, priority=True)
+            return jsonify({"error": "Pose extraction failed"}), 500
+
+    if not outputs:
+        return jsonify({"error": "No human detected in image"}), 400
+
+    # Take the first (most confident) detection
+    person = outputs[0]
+    kp3d = person["pred_keypoints_3d"]  # (70, 3) tensor or ndarray
+
+    if torch.is_tensor(kp3d):
+        kp3d = kp3d.detach().cpu().numpy()
+    kp3d = kp3d.tolist()
+
+    joints = []
+    for i, name in enumerate(MHR70_NAMES):
+        if i < len(kp3d):
+            joints.append({
+                "name": name,
+                "index": i,
+                "position": kp3d[i],
+                "draggable": i in MHR70_DRAGGABLE,
+            })
+
+    return jsonify({
+        "joints": joints,
+        "bones": MHR70_BODY_BONES,
+        "ik_chains": MHR70_IK_CHAINS,
+        "draggable_indices": MHR70_DRAGGABLE,
+    })
+
+
+@app.route("/api/generate-posed", methods=["POST"])
+@require_auth
+def generate_posed():
+    """Re-generate a character in a new pose using Qwen + AnyPose LoRAs."""
+    global _current_image_path, _anypose_loaded
+
+    data = request.get_json(silent=True) or {}
+    prompt = (data.get("prompt") or "").strip()[:MAX_PROMPT_LENGTH]
+    character_image = data.get("character_image")
+    pose_image_b64 = data.get("pose_image")  # base64 data URI from Three.js
+
+    if not character_image:
+        return jsonify({"error": "character_image is required"}), 400
+    if not pose_image_b64:
+        return jsonify({"error": "pose_image is required"}), 400
+
+    # Resolve character image
+    char_fname = Path(character_image).name
+    if not re.match(r"^[a-f0-9]{12}\.png$", char_fname):
+        return jsonify({"error": "Invalid character image"}), 400
+    char_path = OUTPUT_DIR / char_fname
+    if not char_path.is_file():
+        return jsonify({"error": "Character image not found"}), 400
+
+    # Decode pose reference image from base64 (cap at 5MB to prevent abuse)
+    if len(pose_image_b64) > 5 * 1024 * 1024:
+        return jsonify({"error": "Pose image too large"}), 400
+    try:
+        if "," in pose_image_b64:
+            pose_image_b64 = pose_image_b64.split(",", 1)[1]
+        pose_bytes = base64.b64decode(pose_image_b64)
+        pose_img = Image.open(io.BytesIO(pose_bytes)).convert("RGB")
+    except Exception:
+        return jsonify({"error": "Invalid pose image"}), 400
+
+    try:
+        steps = min(max(int(data.get("steps", 4)), 1), 20)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid steps value"}), 400
+
+    if not prompt:
+        prompt = (
+            "Make the person in image 1 do the exact same pose of the person in image 2. "
+            "Keep the style, identity, clothing, and background of image 1. "
+            "The new pose should be pixel accurate to the pose in image 2. "
+            "Match the position of arms, legs, head, and torso exactly."
+        )
+
+    with _lock:
+        _unload_sam3d()
+        _load_qwen()
+
+        # Load AnyPose LoRAs if not already loaded
+        if not _anypose_loaded:
+            logger.info("[Hydra] Loading AnyPose LoRAs ...")
+            _broadcast("model_status", {"action": "loading", "name": "AnyPose LoRAs"}, priority=True)
+            try:
+                _qwen_pipe.load_lora_weights(
+                    "lightx2v/Qwen-Image-Edit-2511-Lightning",
+                    weight_name="Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+                    adapter_name="fast",
+                )
+                _qwen_pipe.load_lora_weights(
+                    "lilylilith/AnyPose",
+                    weight_name="2511-AnyPose-base-000006250.safetensors",
+                    adapter_name="base",
+                )
+                _qwen_pipe.load_lora_weights(
+                    "lilylilith/AnyPose",
+                    weight_name="2511-AnyPose-helper-00006000.safetensors",
+                    adapter_name="helper",
+                )
+                _anypose_loaded = True
+                _broadcast("model_status", {"action": "ready", "name": "AnyPose LoRAs"}, priority=True)
+            except Exception:
+                logger.exception("[Hydra] Failed to load AnyPose LoRAs")
+                _broadcast("error", {"message": "AnyPose LoRA loading failed"}, priority=True)
+                return jsonify({"error": "AnyPose LoRA loading failed"}), 500
+
+        _qwen_pipe.set_adapters(
+            ["fast", "base", "helper"],
+            adapter_weights=[1.0, 0.7, 0.7],
+        )
+
+        char_img = Image.open(str(char_path)).convert("RGB")
+
+        try:
+            with torch.inference_mode():
+                result = _qwen_pipe(
+                    image=[char_img, pose_img],
+                    prompt=prompt,
+                    true_cfg_scale=4.0,
+                    negative_prompt=" ",
+                    num_inference_steps=steps,
+                    guidance_scale=1.0,
+                    num_images_per_prompt=1,
+                    generator=torch.Generator(DEVICE).manual_seed(
+                        int(time.time()) % (2**32)
+                    ),
+                ).images[0]
+        except Exception:
+            logger.exception("[Hydra] Posed generation failed")
+            _broadcast("error", {"message": "Posed generation failed"}, priority=True)
+            return jsonify({"error": "Posed generation failed"}), 500
+        finally:
+            del char_img, pose_img
+            torch.cuda.empty_cache()
+            gc.collect()
+
+        filename = f"{uuid.uuid4().hex[:12]}.png"
+        out = OUTPUT_DIR / filename
+        result.save(str(out))
+        _current_image_path = str(out)
+
+    return jsonify({"image_url": f"/outputs/{filename}"})
 
 
 @app.route("/api/status")

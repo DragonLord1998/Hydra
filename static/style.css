@@ -459,6 +459,257 @@ html, body {
 }
 .toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+/* ================================================================
+   Human (Pose) Button on Image Nodes
+   ================================================================ */
+
+.node-human-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(0,0,0,0.6);
+  backdrop-filter: blur(6px);
+  color: rgba(255,255,255,0.5);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 5;
+  opacity: 0;
+  transition: opacity 0.2s, color 0.2s, border-color 0.2s, background 0.2s;
+  pointer-events: auto;
+}
+.canvas-node:hover .node-human-btn,
+.canvas-node.selected .node-human-btn,
+.canvas-node.edit-selected .node-human-btn {
+  opacity: 1;
+}
+.node-human-btn:hover {
+  color: var(--green);
+  border-color: rgba(16,185,129,0.4);
+  background: rgba(16,185,129,0.1);
+}
+
+/* Revert button */
+.node-revert-btn {
+  position: absolute;
+  top: 8px;
+  right: 42px;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(0,0,0,0.6);
+  backdrop-filter: blur(6px);
+  color: rgba(255,255,255,0.5);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 5;
+  opacity: 0;
+  transition: opacity 0.2s, color 0.2s, border-color 0.2s;
+  pointer-events: auto;
+}
+.canvas-node:hover .node-revert-btn,
+.canvas-node.selected .node-revert-btn,
+.canvas-node.edit-selected .node-revert-btn {
+  opacity: 1;
+}
+.node-revert-btn:hover {
+  color: var(--blue);
+  border-color: rgba(59,130,246,0.4);
+  background: rgba(59,130,246,0.1);
+}
+
+/* ================================================================
+   Pose Editor Overlay
+   ================================================================ */
+
+.pose-editor-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  background: rgba(5, 5, 8, 0.95);
+  backdrop-filter: blur(20px);
+  display: flex;
+  flex-direction: column;
+  animation: pose-fadein 0.2s ease-out;
+}
+
+@keyframes pose-fadein {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.pose-editor-layout {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+.pose-viewport {
+  flex: 1;
+  position: relative;
+  min-width: 0;
+}
+.pose-viewport canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.pose-sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  padding: 16px;
+  border-left: 1px solid var(--card-border);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+}
+
+.pose-sidebar-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pose-sidebar-label {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.pose-reference-img {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  object-fit: cover;
+  aspect-ratio: 1;
+}
+
+.pose-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pose-preset-btn {
+  padding: 5px 10px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.pose-preset-btn:hover {
+  color: var(--text);
+  border-color: var(--border-hover);
+  background: rgba(255,255,255,0.08);
+}
+
+.pose-reset-btn {
+  padding: 8px 12px;
+  background: transparent;
+  border: 1px solid rgba(239,68,68,0.2);
+  border-radius: 6px;
+  color: rgba(239,68,68,0.7);
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.pose-reset-btn:hover {
+  color: var(--red);
+  border-color: rgba(239,68,68,0.4);
+  background: rgba(239,68,68,0.05);
+}
+
+.pose-joint-info {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  padding: 8px 10px;
+  background: rgba(255,255,255,0.02);
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  text-align: center;
+}
+
+/* Bottom bar */
+.pose-bottom-bar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 14px 20px;
+  border-top: 1px solid var(--card-border);
+  background: rgba(5, 5, 8, 0.9);
+}
+
+.pose-prompt-input {
+  flex: 1;
+  padding: 11px 16px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 0.82rem;
+  font-family: var(--font-mono);
+  outline: none;
+  transition: border-color 0.25s, box-shadow 0.25s;
+}
+.pose-prompt-input:focus {
+  border-color: rgba(16,185,129,0.3);
+  box-shadow: 0 0 0 3px rgba(16,185,129,0.06);
+}
+
+.pose-regen-btn {
+  padding: 11px 24px;
+  background: var(--green);
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+.pose-regen-btn:hover {
+  background: #0ea572;
+  box-shadow: 0 0 16px var(--green-glow);
+}
+
+.pose-cancel-btn {
+  padding: 11px 18px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+.pose-cancel-btn:hover {
+  color: var(--text);
+  border-color: var(--border-hover);
+}
+
 /* ---- Responsive ---- */
 @media (max-width: 700px) {
   .overlay-header { padding: 10px 12px; }

@@ -286,6 +286,8 @@
       originalWidth: opts.width || 340,
       originalHeight: opts.height || 340,
       upscaling: false,
+      previousVersions: opts.previousVersions || [],
+      poseData: opts.poseData || null,
       el: null,
     };
 
@@ -321,6 +323,34 @@
       badge.className = "node-upscale-badge";
       badge.textContent = "UPSCALED";
       el.appendChild(badge);
+    }
+
+    // Human (pose) button — only on completed image nodes
+    if (node.url && node.state === "complete") {
+      var humanBtn = document.createElement("button");
+      humanBtn.className = "node-human-btn";
+      humanBtn.title = "Extract & edit pose";
+      humanBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="3"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="9" y1="22" x2="12" y2="16"/><line x1="15" y1="22" x2="12" y2="16"/></svg>';
+      humanBtn.addEventListener("pointerdown", function (e) { e.stopPropagation(); });
+      humanBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        extractAndEditPose(node);
+      });
+      el.appendChild(humanBtn);
+    }
+
+    // Revert button — only if node has previous versions
+    if (node.previousVersions && node.previousVersions.length > 0) {
+      var revertBtn = document.createElement("button");
+      revertBtn.className = "node-revert-btn";
+      revertBtn.title = "Revert to previous version (" + node.previousVersions.length + ")";
+      revertBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
+      revertBtn.addEventListener("pointerdown", function (e) { e.stopPropagation(); });
+      revertBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        revertNode(node);
+      });
+      el.appendChild(revertBtn);
     }
 
     if (node.state === "generating") el.classList.add("generating");
@@ -438,6 +468,194 @@
   }
 
   // ---------------------------------------------------------------
+  // Pose: Extract, Edit, Regenerate
+  // ---------------------------------------------------------------
+
+  async function extractAndEditPose(node) {
+    if (busy || !node.url) return;
+
+    showNodeLoading(node, "Extracting pose...");
+
+    try {
+      var resp = await fetch("/api/extract-pose", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source_image: node.url }),
+      });
+      var data = await resp.json();
+
+      if (!resp.ok) {
+        showToast(data.error || "Pose extraction failed");
+        hideNodeLoading(node);
+        return;
+      }
+
+      hideNodeLoading(node);
+
+      // Open the fullscreen pose editor
+      if (!window.HydraPoseEditor) {
+        showToast("Pose editor not loaded — check Three.js");
+        return;
+      }
+
+      window.HydraPoseEditor.open(
+        data,
+        node.url,
+        node.url,
+        node.prompt || "",
+        function onRegenerate(poseImage, prompt, characterImageUrl) {
+          regenerateWithPose(node, poseImage, prompt, characterImageUrl);
+        },
+        function onClose() {
+          // Nothing to do — editor cleans itself up
+        }
+      );
+    } catch (err) {
+      showToast("Pose extraction failed: " + err.message);
+      hideNodeLoading(node);
+    }
+  }
+
+  async function regenerateWithPose(node, poseImage, prompt, characterImageUrl) {
+    if (busy) return;
+    busy = true; // Set immediately to prevent double-fire
+
+    promptInput.disabled = true;
+    modeToggle.classList.add("loading");
+
+    // Save current version before overwriting
+    if (node.url) {
+      if (!node.previousVersions) node.previousVersions = [];
+      node.previousVersions.push({
+        url: node.url,
+        prompt: node.prompt,
+        timestamp: Date.now(),
+      });
+      // Cap at 5 versions
+      if (node.previousVersions.length > 5) {
+        node.previousVersions = node.previousVersions.slice(-5);
+      }
+    }
+
+    showNodeLoading(node, "Regenerating pose...");
+    node.el.classList.add("generating");
+    generatingId = node.id;
+
+    try {
+      var resp = await fetch("/api/generate-posed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          character_image: characterImageUrl,
+          pose_image: poseImage,
+          prompt: prompt,
+          steps: 4,
+        }),
+      });
+      var data = await resp.json();
+
+      if (resp.ok && data.image_url) {
+        node.url = data.image_url;
+        node.prompt = prompt;
+        node.timestamp = Date.now();
+        node.state = "complete";
+
+        // Update image in the node
+        var img = node.el.querySelector("img");
+        if (!img) {
+          img = document.createElement("img");
+          img.draggable = false;
+          node.el.appendChild(img);
+        }
+        img.src = data.image_url + "?t=" + Date.now();
+        img.alt = "Posed";
+        img.classList.remove("preview-img");
+        node.el.classList.remove("generating");
+        clearNodeOverlays(node);
+
+        // Re-render the node to add/update revert button
+        refreshNodeButtons(node);
+      } else {
+        showToast(data.error || "Posed generation failed");
+        // Revert the version push since generation failed
+        if (node.previousVersions && node.previousVersions.length > 0) {
+          node.previousVersions.pop();
+        }
+        node.el.classList.remove("generating");
+        hideNodeLoading(node);
+      }
+    } catch (err) {
+      showToast("Posed generation failed: " + err.message);
+      if (node.previousVersions && node.previousVersions.length > 0) {
+        node.previousVersions.pop();
+      }
+      node.el.classList.remove("generating");
+      hideNodeLoading(node);
+    } finally {
+      busy = false;
+      generatingId = null;
+      promptInput.disabled = false;
+      modeToggle.classList.remove("loading");
+      promptInput.focus();
+      saveCanvasState();
+    }
+  }
+
+  function revertNode(node) {
+    if (!node.previousVersions || node.previousVersions.length === 0) return;
+
+    var prev = node.previousVersions.pop();
+    node.url = prev.url;
+    node.prompt = prev.prompt;
+    node.timestamp = Date.now();
+
+    var img = node.el.querySelector("img");
+    if (img) {
+      img.src = prev.url + "?t=" + Date.now();
+    }
+
+    refreshNodeButtons(node);
+    saveCanvasState();
+    showToast("Reverted (" + node.previousVersions.length + " versions left)");
+  }
+
+  function refreshNodeButtons(node) {
+    // Remove existing human/revert buttons and re-add them
+    var oldHuman = node.el.querySelector(".node-human-btn");
+    if (oldHuman) oldHuman.remove();
+    var oldRevert = node.el.querySelector(".node-revert-btn");
+    if (oldRevert) oldRevert.remove();
+
+    // Re-add human button
+    if (node.url && node.state === "complete") {
+      var humanBtn = document.createElement("button");
+      humanBtn.className = "node-human-btn";
+      humanBtn.title = "Extract & edit pose";
+      humanBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="3"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="9" y1="22" x2="12" y2="16"/><line x1="15" y1="22" x2="12" y2="16"/></svg>';
+      humanBtn.addEventListener("pointerdown", function (e) { e.stopPropagation(); });
+      humanBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        extractAndEditPose(node);
+      });
+      node.el.appendChild(humanBtn);
+    }
+
+    // Re-add revert button if there are versions
+    if (node.previousVersions && node.previousVersions.length > 0) {
+      var revertBtn = document.createElement("button");
+      revertBtn.className = "node-revert-btn";
+      revertBtn.title = "Revert to previous version (" + node.previousVersions.length + ")";
+      revertBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
+      revertBtn.addEventListener("pointerdown", function (e) { e.stopPropagation(); });
+      revertBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        revertNode(node);
+      });
+      node.el.appendChild(revertBtn);
+    }
+  }
+
+  // ---------------------------------------------------------------
   // SeedVR2 Upscale
   // ---------------------------------------------------------------
 
@@ -535,6 +753,7 @@
         state: n.state,
         originalUrl: n.originalUrl, originalWidth: n.originalWidth,
         originalHeight: n.originalHeight,
+        previousVersions: n.previousVersions || [],
       });
     });
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch (_) {}
@@ -553,10 +772,11 @@
         var nd = saved.nodes[i];
         nd.el = null;
         nd.upscaling = false;
-        // Backfill fields for nodes saved before upscale support
+        // Backfill fields for nodes saved before upscale/pose support
         if (!nd.originalUrl) nd.originalUrl = nd.url;
         if (!nd.originalWidth) nd.originalWidth = nd.width;
         if (!nd.originalHeight) nd.originalHeight = nd.height;
+        if (!nd.previousVersions) nd.previousVersions = [];
         nodes.set(nd.id, nd);
         renderNode(nd);
       }
