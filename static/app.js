@@ -1011,6 +1011,7 @@
 
         newNode.el.classList.remove("generating");
         clearNodeOverlays(newNode);
+        refreshNodeButtons(newNode);
       } else {
         showToast(data.error || "Request failed");
         removeNode(newNode.id);

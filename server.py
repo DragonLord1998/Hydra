@@ -119,12 +119,20 @@ def _load_taesd():
     if _taesd is not None:
         return
 
+    import logging as _logging
     from diffusers import AutoencoderTiny
 
     logger.info("[Hydra] Loading TAESD from %s ...", TAESD_MODEL)
-    _taesd = AutoencoderTiny.from_pretrained(
-        TAESD_MODEL, torch_dtype=torch.bfloat16, token=HF_TOKEN,
-    ).to(DEVICE)
+    # Suppress spurious "config attributes {'block_out_channels': ...} will be ignored" warning
+    _diffusers_logger = _logging.getLogger("diffusers.configuration_utils")
+    _prev_level = _diffusers_logger.level
+    _diffusers_logger.setLevel(_logging.ERROR)
+    try:
+        _taesd = AutoencoderTiny.from_pretrained(
+            TAESD_MODEL, torch_dtype=torch.bfloat16, token=HF_TOKEN,
+        ).to(DEVICE)
+    finally:
+        _diffusers_logger.setLevel(_prev_level)
     _taesd.eval()
     logger.info("[Hydra] TAESD ready.")
 
@@ -143,13 +151,19 @@ def _unpack_latents(latents: torch.Tensor, height: int, width: int) -> torch.Ten
 
 def _taesd_preview(latents: torch.Tensor, height: int, width: int,
                    size: int = 512) -> str | None:
-    """Decode packed Flux latents via TAESD → JPEG data URI."""
+    """Decode packed Flux/Z-Image latents via TAESD → JPEG data URI."""
     try:
         _load_taesd()
         with torch.inference_mode():
-            spatial = _unpack_latents(
-                latents[:1].detach(), height, width,
-            ).to(device=DEVICE, dtype=torch.bfloat16)
+            lat = latents[:1].detach()
+            if lat.ndim == 3:
+                # Packed format (B, seq, 64) — need to unpack to spatial
+                spatial = _unpack_latents(lat, height, width)
+            else:
+                # Already spatial (B, C, H, W)
+                spatial = lat
+            spatial = spatial.to(device=DEVICE, dtype=torch.bfloat16)
+
             decoded = _taesd.decode(spatial, return_dict=False)[0]  # (1, 3, H, W)
             del spatial
 
@@ -400,12 +414,37 @@ def _load_gen(variant: str = "deturbo"):
             token=HF_TOKEN,
         )
 
+    # Z-Image's VAE ships with force_upcast=True (fp16 causes NaN/black images).
+    # BF16 has the same exponent range as fp32 so it's numerically stable —
+    # skip the costly fp32 cast to speed up the final decode significantly.
+    if _gen_pipe.vae is not None and _gen_pipe.dtype == torch.bfloat16:
+        _gen_pipe.vae.config.force_upcast = False
+
     _gen_pipe.enable_model_cpu_offload()
     _gen_variant = variant
 
     if _current_lora:
         logger.info("[Hydra] Loading LoRA: %s", _current_lora["name"])
         _gen_pipe.load_lora_weights(_current_lora["path"])
+
+    # Warmup — first inference triggers CUDA kernel compilation and
+    # cpu_offload hook setup; run a tiny throw-away pass so the
+    # first real generation isn't penalised.
+    logger.info("[Hydra] Warmup pass (%s)...", label)
+    _broadcast("model_status", {"action": "loading", "name": f"Warming up {label}..."}, priority=True)
+    try:
+        with torch.inference_mode():
+            _gen_pipe(
+                prompt="warmup",
+                height=256,
+                width=256,
+                num_inference_steps=1,
+                guidance_scale=0.0,
+            )
+    except Exception:
+        logger.debug("[Hydra] Warmup failed (non-fatal)", exc_info=True)
+    torch.cuda.empty_cache()
+    gc.collect()
 
     print(f"[Hydra] {label} pipeline ready.")
     _broadcast("model_status", {"action": "ready", "name": label}, priority=True)
@@ -558,6 +597,7 @@ def generate():
 
     with _lock:
         _load_gen(variant)
+        _load_taesd()
 
         generator = torch.Generator(DEVICE).manual_seed(seed)
 
@@ -565,6 +605,8 @@ def generate():
             if (step_index + 1) % 2 == 0:
                 latents = cb_kwargs.get("latents")
                 if latents is not None:
+                    if step_index == 0:
+                        logger.info("[Hydra] Callback latent shape: %s (ndim=%d)", latents.shape, latents.ndim)
                     b64 = _taesd_preview(latents, height, width)
                     if not b64:
                         b64 = _raw_latents_preview(latents)
@@ -574,6 +616,8 @@ def generate():
                             "total": total_steps,
                             "image": b64,
                         })
+            if step_index + 1 >= total_steps:
+                _broadcast("model_status", {"action": "loading", "name": "Decoding final image..."}, priority=True)
             return cb_kwargs
 
         # Build pipeline kwargs (SRPO/Flux doesn't use cfg_normalization)
