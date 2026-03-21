@@ -271,7 +271,8 @@ MHR70_IK_CHAINS = [
 ]
 
 SAM3D_CHECKPOINT = os.environ.get(
-    "SAM3D_CHECKPOINT", "facebook/sam-3d-body-dinov3"
+    "SAM3D_CHECKPOINT",
+    str(BASE_DIR / "checkpoints" / "sam-3d-body-dinov3"),
 )
 
 
