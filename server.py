@@ -199,6 +199,7 @@ def _vae_preview(latents: torch.Tensor, height: int, width: int,
 
             # Decode on CPU (VAE parameters stay on CPU via model_cpu_offload;
             # vae.decode() doesn't trigger the offload hook since it isn't forward())
+            spatial = spatial.to(dtype=vae.dtype)
             decoded = vae.decode(spatial, return_dict=False)[0]
 
             img = decoded[0].clamp(-1, 1).add(1).div(2)
