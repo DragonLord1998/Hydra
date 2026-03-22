@@ -1,9 +1,6 @@
 flask
-torch
+fal-client
 Pillow
-accelerate
-sentencepiece
-transformers
-blinker
-# diffusers — install from git main (not PyPI) for ZImagePipeline & QwenImageEditPlusPipeline:
-# pip install git+https://github.com/huggingface/diffusers.git
+# Optional — only needed for SAM 3D Body pose extraction:
+# torch
+# sam-3d-body

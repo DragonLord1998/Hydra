@@ -19,10 +19,7 @@
     <div class="overlay-header">
       <div class="header-row">
         <h1 class="title">HYDRA</h1>
-        <div class="model-selector" id="modelSelector">
-          <button class="model-btn active" data-model="srpo">SRPO</button>
-          <button class="model-btn" data-model="base">Z-IMAGE</button>
-        </div>
+        <span class="model-badge">FLUX 2</span>
         <div class="lora-controls">
           <input type="text" id="triggerWord" class="trigger-input" placeholder="trigger" value="chrx" spellcheck="false">
           <label class="lora-btn" id="loraBtn" title="Upload LoRA (.safetensors)">
@@ -51,13 +48,16 @@
             <option value="1024x1536">1024 x 1536</option>
             <option value="1536x1024">1536 x 1024</option>
             <option value="1536x1536">1536 x 1536</option>
+            <option value="2048x1024">2048 x 1024</option>
+            <option value="1024x2048">1024 x 2048</option>
+            <option value="2048x2048">2048 x 2048 (4MP)</option>
           </select>
         </div>
         <div class="settings-row">
           <label class="settings-label">Steps</label>
           <div class="steps-control">
-            <input type="range" id="stepsRange" class="settings-range" min="1" max="100" value="50">
-            <span class="steps-value" id="stepsValue">50</span>
+            <input type="range" id="stepsRange" class="settings-range" min="1" max="50" value="28">
+            <span class="steps-value" id="stepsValue">28</span>
           </div>
         </div>
         <div class="settings-row" id="cfgRow">

@@ -14,7 +14,6 @@
   var loraBtn        = document.getElementById("loraBtn");
   var triggerWord    = document.getElementById("triggerWord");
   var loraStatus     = document.getElementById("loraStatus");
-  var modelBtns      = document.querySelectorAll(".model-btn");
   var settingsBtn    = document.getElementById("settingsBtn");
   var settingsPanel  = document.getElementById("settingsPanel");
   var resolutionSelect = document.getElementById("resolutionSelect");
@@ -29,7 +28,6 @@
 
   // --- State ---
   var mode = "generate";
-  var genVariant = "srpo";
   var busy = false;
   var placementCounter = 0;
 
@@ -277,7 +275,7 @@
       height: opts.height || 340,
       prompt: opts.prompt || "",
       mode: opts.mode || "generate",
-      model: opts.model || genVariant,
+      model: opts.model || "flux2",
       parentId: opts.parentId || null,
       seed: opts.seed || null,
       timestamp: Date.now(),
@@ -432,16 +430,6 @@
   // Per-node overlays
   // ---------------------------------------------------------------
 
-  function showNodeStepCounter(node, step, total) {
-    var counter = node.el.querySelector(".node-step-counter");
-    if (!counter) {
-      counter = document.createElement("div");
-      counter.className = "node-step-counter";
-      node.el.appendChild(counter);
-    }
-    counter.textContent = step + " / " + total;
-  }
-
   function showNodeLoading(node, text) {
     var overlay = node.el.querySelector(".node-loading-overlay");
     if (!overlay) {
@@ -549,7 +537,7 @@
           character_image: characterImageUrl,
           pose_image: poseImage,
           prompt: prompt,
-          steps: 4,
+          steps: parseInt(stepsRange.value, 10) || 28,
         }),
       });
       var data = await resp.json();
@@ -791,14 +779,7 @@
   // Model selector
   // ---------------------------------------------------------------
 
-  modelBtns.forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      if (busy) return;
-      genVariant = btn.dataset.model;
-      modelBtns.forEach(function (b) { b.classList.toggle("active", b === btn); });
-      if (mode === "generate") syncDefaultSteps(genVariant);
-    });
-  });
+  // Model selector removed -- Flux 2 is the only model
 
   // ---------------------------------------------------------------
   // Settings panel
@@ -818,23 +799,16 @@
     cfgValue.textContent = cfgRange.value;
   });
 
-  function syncDefaultSteps(variant) {
-    var defaults = { srpo: 50, base: 50 };
-    stepsRange.value = defaults[variant] || 50;
-    stepsValue.textContent = stepsRange.value;
-    var cfgDefaults = { srpo: 3.5, base: 4.0 };
-    cfgRange.value = cfgDefaults[variant] || 3.5;
-    cfgValue.textContent = cfgRange.value;
+  function syncDefaultSteps() {
+    stepsRange.value = 28;
+    stepsValue.textContent = "28";
+    cfgRange.value = 3.5;
+    cfgValue.textContent = "3.5";
   }
 
-  function syncStepsForMode(m) {
-    if (m === "edit") {
-      stepsRange.value = 20;
-    } else {
-      var defaults = { srpo: 50, base: 50 };
-      stepsRange.value = defaults[genVariant] || 50;
-    }
-    stepsValue.textContent = stepsRange.value;
+  function syncStepsForMode() {
+    stepsRange.value = 28;
+    stepsValue.textContent = "28";
   }
 
   // ---------------------------------------------------------------
@@ -968,7 +942,7 @@
     var newNode = createNode({
       prompt: prompt,
       mode: mode,
-      model: genVariant,
+      model: "flux2",
       width: dispW,
       height: dispH,
       parentId: mode === "edit" ? selectedId : null,
@@ -980,7 +954,7 @@
     var cfg = parseFloat(cfgRange.value);
     var endpoint = mode === "generate" ? "/api/generate" : "/api/edit";
     var payload = mode === "generate"
-      ? { prompt: prompt, model: genVariant, width: w, height: h, steps: steps, cfg: cfg }
+      ? { prompt: prompt, width: w, height: h, steps: steps, cfg: cfg }
       : { prompt: prompt, steps: steps, source_image: selectedUrl };
 
     try {
@@ -1036,40 +1010,6 @@
   var evtSource = new EventSource("/api/stream");
 
   function attachSSEListeners(src) {
-    src.addEventListener("preview", function (e) {
-      var data = JSON.parse(e.data);
-
-      // Pick up mid-generation on reconnect
-      if (!busy) {
-        busy = true;
-        promptInput.disabled = true;
-        modeToggle.classList.add("loading");
-        if (!generatingId) {
-          var gNode = createNode({ state: "generating" });
-          generatingId = gNode.id;
-          selectNode(gNode.id);
-        }
-      }
-
-      var node = generatingId && nodes.get(generatingId);
-      if (!node || !node.el) return;
-
-      var img = node.el.querySelector("img");
-      if (!img) {
-        // Remove placeholder text
-        var ph = node.el.querySelector(".node-placeholder");
-        if (ph) ph.remove();
-        img = document.createElement("img");
-        img.alt = "Preview";
-        img.draggable = false;
-        node.el.appendChild(img);
-      }
-      img.src = data.image;
-      img.classList.add("preview-img");
-
-      showNodeStepCounter(node, data.step, data.total);
-    });
-
     src.addEventListener("model_status", function (e) {
       var data = JSON.parse(e.data);
       var node = generatingId && nodes.get(generatingId);
@@ -1132,11 +1072,6 @@
       loraStatus.classList.add("visible");
       if (data.lora.trigger) triggerWord.value = data.lora.trigger;
     }
-    if (data.gen_variant) {
-      genVariant = data.gen_variant;
-      modelBtns.forEach(function (b) { b.classList.toggle("active", b.dataset.model === genVariant); });
-    }
-
     // If no nodes from localStorage, restore last server image
     if (data.image_url && nodes.size === 0) {
       var node = createNode({ url: data.image_url, state: "complete" });
