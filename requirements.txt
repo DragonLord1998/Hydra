@@ -1,5 +1,6 @@
 flask
 torch
+torchvision  # must match torch version (e.g. torch 2.10 → torchvision 0.25)
 Pillow
 accelerate
 sentencepiece

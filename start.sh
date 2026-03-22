@@ -14,9 +14,23 @@ sudo apt-get -y install libopenmpi-dev 2>/dev/null || true
 # PyTorch
 # ---------------------------------------------------------------------------
 CUDA_TAG=$(python3 -c "import torch; print('cu' + torch.version.cuda.replace('.','')[:3])" 2>/dev/null || echo "cu124")
-echo "[Hydra] Detected CUDA: $CUDA_TAG"
+TORCH_VER=$(python3 -c "import torch; print(torch.__version__.split('+')[0])" 2>/dev/null || echo "2.10.0")
+echo "[Hydra] Detected CUDA: $CUDA_TAG, torch: $TORCH_VER"
+
+# Map torch version to compatible torchvision version
+case "$TORCH_VER" in
+  2.10.*) TV_VER="0.25.0" ;;
+  2.9.*)  TV_VER="0.24.1" ;;
+  2.8.*)  TV_VER="0.23.0" ;;
+  *)      TV_VER="" ;;
+esac
+
 pip uninstall -y torchvision 2>/dev/null || true
-pip install --quiet torchvision --no-deps --index-url "https://download.pytorch.org/whl/${CUDA_TAG}"
+if [ -n "$TV_VER" ]; then
+  pip install --quiet "torchvision==${TV_VER}+${CUDA_TAG}" --index-url "https://download.pytorch.org/whl/${CUDA_TAG}"
+else
+  pip install --quiet torchvision --no-deps --index-url "https://download.pytorch.org/whl/${CUDA_TAG}"
+fi
 
 # ---------------------------------------------------------------------------
 # Diffusers (from git main for Flux2Pipeline + from_single_file NVFP4 support)
