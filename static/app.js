@@ -25,6 +25,9 @@
   var cfgRow         = document.getElementById("cfgRow");
   var uploadImgBtn   = document.getElementById("uploadImgBtn");
   var imageFile      = document.getElementById("imageFile");
+  var uploadProgress     = document.getElementById("uploadProgress");
+  var uploadProgressFill = document.getElementById("uploadProgressFill");
+  var uploadProgressText = document.getElementById("uploadProgressText");
 
   // --- State ---
   var mode = "generate";
@@ -858,24 +861,56 @@
   // LoRA upload
   // ---------------------------------------------------------------
 
-  loraFile.addEventListener("change", async function () {
+  function showUploadProgress(pct) {
+    uploadProgress.classList.add("active");
+    loraStatus.classList.remove("visible");
+    uploadProgressFill.style.width = pct + "%";
+    uploadProgressText.textContent = pct + "%";
+  }
+
+  function hideUploadProgress() {
+    uploadProgress.classList.remove("active");
+  }
+
+  loraFile.addEventListener("change", function () {
     var file = loraFile.files[0];
     if (!file) return;
     var trigger = triggerWord.value.trim() || "chrx";
     var fd = new FormData();
     fd.append("lora", file);
     fd.append("trigger_word", trigger);
-    try {
-      var resp = await fetch("/api/upload-lora", { method: "POST", body: fd });
-      var data = await resp.json();
-      if (resp.ok) {
-        loraBtn.classList.add("loaded");
-        loraStatus.textContent = data.name;
-        loraStatus.classList.add("visible");
-      } else {
-        showToast(data.error || "Upload failed");
+
+    showUploadProgress(0);
+
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/upload-lora");
+
+    xhr.upload.onprogress = function (e) {
+      if (e.lengthComputable) {
+        showUploadProgress(Math.round((e.loaded / e.total) * 100));
       }
-    } catch (err) { showToast("Upload failed: " + err.message); }
+    };
+
+    xhr.onload = function () {
+      hideUploadProgress();
+      try {
+        var data = JSON.parse(xhr.responseText);
+        if (xhr.status === 200) {
+          loraBtn.classList.add("loaded");
+          loraStatus.textContent = data.name;
+          loraStatus.classList.add("visible");
+        } else {
+          showToast(data.error || "Upload failed");
+        }
+      } catch (_) { showToast("Upload failed"); }
+    };
+
+    xhr.onerror = function () {
+      hideUploadProgress();
+      showToast("Upload failed");
+    };
+
+    xhr.send(fd);
     loraFile.value = "";
   });
 

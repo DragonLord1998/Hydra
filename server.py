@@ -3,7 +3,7 @@ Hydra -- Character Developer
 
 Flux 2 local inference (pre-quantized checkpoint via diffusers).
 Single model for generation + editing.
-TAESD-accelerated live latent previews.
+Live latent previews via pipeline VAE decode on CPU.
 SAM 3D Body for local pose extraction.
 SeedVR2 for local upscaling.
 """
@@ -48,7 +48,6 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 FLUX2_MODEL = os.environ.get("FLUX2_MODEL", "black-forest-labs/FLUX.2-dev")
 FLUX2_NVFP4_REPO = os.environ.get("FLUX2_NVFP4_REPO", "black-forest-labs/FLUX.2-dev-NVFP4")
 FLUX2_BNB4_REPO = os.environ.get("FLUX2_BNB4_REPO", "diffusers/FLUX.2-dev-bnb-4bit")
-TAESD_MODEL = os.environ.get("TAESD_MODEL", "madebyollin/taef1")
 SEEDVR2_CLI = os.environ.get("SEEDVR2_CLI", "/workspace/seedvr2/inference_cli.py")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 HYDRA_API_KEY = os.environ.get("HYDRA_API_KEY")  # optional auth
@@ -82,7 +81,6 @@ _lock = threading.Lock()
 _busy_lock = threading.Lock()
 _busy = False
 _flux_pipe = None                       # Flux2Pipeline with NVFP4 transformer
-_taesd = None                           # AutoencoderTiny for live previews
 _current_lora: dict | None = None       # {"path", "name", "trigger"}
 _current_image_path: str | None = None  # last generated/edited image
 _sam3d_estimator = None                 # SAM3DBodyEstimator
@@ -144,101 +142,121 @@ def _validate_resolution(width: int, height: int) -> tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
-# TAESD -- tiny autoencoder for live latent previews
+# Live latent previews (Flux 2 VAE decode)
+# ---------------------------------------------------------------------------
+# Flux 2 uses 128-channel packed latents (32 VAE channels × 2×2 patchify),
+# incompatible with TAEF1 (trained on Flux 1's 16 channels).  We decode
+# intermediate previews using the pipeline's own VAE at reduced resolution
+# on CPU, which avoids GPU OOM during the transformer forward pass.
 # ---------------------------------------------------------------------------
 
-def _load_taesd():
-    """Lazy-load TAESD (~2MB). Stays resident on GPU."""
-    global _taesd
-    if _taesd is not None:
-        return
+def _vae_preview(latents: torch.Tensor, height: int, width: int,
+                 size: int = 512) -> str | None:
+    """Decode Flux 2 packed latents via the pipeline's own VAE -> JPEG data URI.
 
-    import logging as _logging
-    from diffusers import AutoencoderTiny
-
-    logger.info("[Hydra] Loading TAESD from %s ...", TAESD_MODEL)
-    _diffusers_logger = _logging.getLogger("diffusers.configuration_utils")
-    _prev_level = _diffusers_logger.level
-    _diffusers_logger.setLevel(_logging.ERROR)
+    Pipeline: unpack packed sequence → BN denormalize → unpatchify → VAE decode.
+    Latents are downscaled before decode for speed (CPU decode of ~32×32 latents).
+    """
     try:
-        _taesd = AutoencoderTiny.from_pretrained(
-            TAESD_MODEL, torch_dtype=torch.bfloat16, token=HF_TOKEN,
-        ).to(DEVICE)
-    finally:
-        _diffusers_logger.setLevel(_prev_level)
-    _taesd.eval()
-    logger.info("[Hydra] TAESD ready.")
+        if _flux_pipe is None or _flux_pipe.vae is None:
+            return None
 
+        vae = _flux_pipe.vae
 
-def _unpack_latents(latents: torch.Tensor, height: int, width: int) -> torch.Tensor:
-    """Unpack Flux packed latents (B, seq, 64) -> spatial (B, 16, H, W)."""
-    batch_size, _num_patches, channels = latents.shape
-    vae_scale_factor = 8
-    h = 2 * (height // (vae_scale_factor * 2))
-    w = 2 * (width // (vae_scale_factor * 2))
-    latents = latents.view(batch_size, h // 2, w // 2, channels // 4, 2, 2)
-    latents = latents.permute(0, 3, 1, 4, 2, 5)
-    latents = latents.reshape(batch_size, channels // 4, h, w)
-    return latents
-
-
-def _taesd_preview(latents: torch.Tensor, height: int, width: int,
-                   size: int = 512) -> str | None:
-    """Decode packed Flux latents via TAESD -> JPEG data URI."""
-    try:
-        _load_taesd()
         with torch.inference_mode():
-            lat = latents[:1].detach()
+            lat = latents[:1].detach().cpu().float()
+
             if lat.ndim == 3:
-                spatial = _unpack_latents(lat, height, width)
+                # Packed format: (B, seq_len, C) -> spatial (B, C, h/2, w/2)
+                batch_size, seq_len, channels = lat.shape
+                vae_sf = getattr(_flux_pipe, 'vae_scale_factor', 8)
+                h = 2 * (height // (vae_sf * 2))
+                w = 2 * (width // (vae_sf * 2))
+                spatial = lat.permute(0, 2, 1).reshape(batch_size, channels, h // 2, w // 2)
             else:
                 spatial = lat
-            spatial = spatial.to(device=DEVICE, dtype=torch.bfloat16)
-            decoded = _taesd.decode(spatial, return_dict=False)[0]
-            del spatial
 
-        img = decoded[0].clamp(-1, 1).add(1).div(2)
-        img = img.float().cpu().permute(1, 2, 0).numpy()
-        del decoded
+            # BatchNorm denormalization (Flux 2 specific -- applied before VAE)
+            if hasattr(vae, 'bn') and vae.bn is not None:
+                bn_mean = vae.bn.running_mean.cpu().view(1, -1, 1, 1).float()
+                bn_var = vae.bn.running_var.cpu().view(1, -1, 1, 1).float()
+                bn_eps = getattr(vae.config, 'batch_norm_eps', 1e-5)
+                spatial = spatial * torch.sqrt(bn_var + bn_eps) + bn_mean
+
+            # Unpatchify: (B, C, H, W) -> (B, C//4, H*2, W*2)
+            b, c, ph, pw = spatial.shape
+            if c >= 8:
+                spatial = spatial.reshape(b, c // 4, 2, 2, ph, pw)
+                spatial = spatial.permute(0, 1, 4, 2, 5, 3)
+                spatial = spatial.reshape(b, c // 4, ph * 2, pw * 2)
+
+            # Downscale for fast CPU decode
+            ds = min(32, spatial.shape[2], spatial.shape[3])
+            if spatial.shape[2] > ds or spatial.shape[3] > ds:
+                spatial = torch.nn.functional.interpolate(
+                    spatial, size=(ds, ds), mode='bilinear', align_corners=False,
+                )
+
+            # Decode on CPU (VAE parameters stay on CPU via model_cpu_offload;
+            # vae.decode() doesn't trigger the offload hook since it isn't forward())
+            decoded = vae.decode(spatial, return_dict=False)[0]
+
+            img = decoded[0].clamp(-1, 1).add(1).div(2)
+            img = img.permute(1, 2, 0).numpy()
+
         rgb = (img * 255).clip(0, 255).astype(np.uint8)
-        del img
         preview = Image.fromarray(rgb).resize((size, size), Image.LANCZOS)
-        del rgb
         buf = io.BytesIO()
         preview.save(buf, format="JPEG", quality=70)
         return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
     except Exception:
-        logger.debug("[Hydra] TAESD preview failed, falling back to raw", exc_info=True)
+        logger.warning("[Hydra] VAE preview failed", exc_info=True)
         return None
 
 
-def _raw_latents_preview(latents: torch.Tensor, size: int = 256) -> str | None:
-    """Approximate RGB preview from raw latent channels (fallback)."""
+def _raw_latents_preview(latents: torch.Tensor, height: int, width: int,
+                         size: int = 256) -> str | None:
+    """Approximate RGB preview from properly unpacked Flux 2 latents (fallback)."""
     try:
-        if latents.dim() == 3:
-            _b, seq_len, _c = latents.shape
-            h = w = int(seq_len ** 0.5)
-            if h * w < seq_len:
-                h += 1
-            usable = min(h * w, seq_len)
-            lat = latents[0, :usable, :3].detach().float().cpu()
-            rows = min(h, int(usable ** 0.5) + 1)
-            lat = lat.reshape(rows, -1, 3)[:h, :w, :]
-        elif latents.dim() == 4:
-            lat = latents[0, :3].detach().float().cpu().permute(1, 2, 0)
+        lat = latents[:1].detach().cpu().float()
+
+        if lat.ndim == 3:
+            # Unpack: (B, seq, C) -> spatial
+            b, seq_len, c = lat.shape
+            vae_sf = getattr(_flux_pipe, 'vae_scale_factor', 8) if _flux_pipe else 8
+            h = 2 * (height // (vae_sf * 2))
+            w = 2 * (width // (vae_sf * 2))
+            spatial = lat.permute(0, 2, 1).reshape(b, c, h // 2, w // 2)
+        elif lat.ndim == 4:
+            spatial = lat
         else:
             return None
 
-        vmin, vmax = lat.min(), lat.max()
-        if (vmax - vmin) > 1e-8:
-            lat = (lat - vmin) / (vmax - vmin)
-        else:
-            lat = torch.full_like(lat, 0.5)
+        # BN + unpatchify if pipeline available
+        if _flux_pipe and hasattr(_flux_pipe.vae, 'bn') and _flux_pipe.vae.bn is not None:
+            vae = _flux_pipe.vae
+            bn_mean = vae.bn.running_mean.cpu().view(1, -1, 1, 1).float()
+            bn_var = vae.bn.running_var.cpu().view(1, -1, 1, 1).float()
+            bn_eps = getattr(vae.config, 'batch_norm_eps', 1e-5)
+            spatial = spatial * torch.sqrt(bn_var + bn_eps) + bn_mean
 
-        rgb = (lat.numpy() * 255).clip(0, 255).astype(np.uint8)
-        del lat
+        # Unpatchify
+        b, c, ph, pw = spatial.shape
+        if c >= 8:
+            spatial = spatial.reshape(b, c // 4, 2, 2, ph, pw)
+            spatial = spatial.permute(0, 1, 4, 2, 5, 3)
+            spatial = spatial.reshape(b, c // 4, ph * 2, pw * 2)
+
+        # Take first 3 channels as RGB approximation
+        rgb_approx = spatial[0, :3]
+        vmin, vmax = rgb_approx.min(), rgb_approx.max()
+        if (vmax - vmin) > 1e-8:
+            rgb_approx = (rgb_approx - vmin) / (vmax - vmin)
+        else:
+            rgb_approx = torch.full_like(rgb_approx, 0.5)
+
+        rgb = (rgb_approx.permute(1, 2, 0).numpy() * 255).clip(0, 255).astype(np.uint8)
         preview = Image.fromarray(rgb).resize((size, size), Image.LANCZOS)
-        del rgb
         buf = io.BytesIO()
         preview.save(buf, format="JPEG", quality=60)
         return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
@@ -523,7 +541,6 @@ def generate():
     try:
         with _lock:
             _load_flux()
-            _load_taesd()
 
             generator = torch.Generator(DEVICE).manual_seed(seed)
 
@@ -531,9 +548,9 @@ def generate():
                 if (step_index + 1) % 2 == 0:
                     latents = cb_kwargs.get("latents")
                     if latents is not None:
-                        b64 = _taesd_preview(latents, height, width)
+                        b64 = _vae_preview(latents, height, width)
                         if not b64:
-                            b64 = _raw_latents_preview(latents)
+                            b64 = _raw_latents_preview(latents, height, width)
                         if b64:
                             _broadcast("preview", {
                                 "step": step_index + 1,
@@ -614,12 +631,15 @@ def edit_image():
             _load_flux()
 
             source = Image.open(_current_image_path).convert("RGB")
+            width, height = source.size
 
             def _on_edit_step(pipe, step_index, timestep, cb_kwargs):
                 if (step_index + 1) % 2 == 0:
                     latents = cb_kwargs.get("latents")
                     if latents is not None:
-                        b64 = _raw_latents_preview(latents)
+                        b64 = _vae_preview(latents, height, width)
+                        if not b64:
+                            b64 = _raw_latents_preview(latents, height, width)
                         if b64:
                             _broadcast("preview", {
                                 "step": step_index + 1,
@@ -959,6 +979,5 @@ if __name__ == "__main__":
     # Pre-load Flux 2 at startup so the first request is instant
     logger.info("[Hydra] Pre-loading Flux 2...")
     _load_flux()
-    _load_taesd()
 
     app.run(host="0.0.0.0", port=7862, debug=False, threaded=True)
