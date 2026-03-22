@@ -40,7 +40,7 @@ pip install --quiet git+https://github.com/huggingface/diffusers.git
 # ---------------------------------------------------------------------------
 # Other Python deps
 # ---------------------------------------------------------------------------
-pip install --quiet flask Pillow accelerate sentencepiece transformers numpy bitsandbytes --ignore-installed blinker
+pip install --quiet flask Pillow accelerate sentencepiece transformers numpy bitsandbytes peft --ignore-installed blinker
 
 # ---------------------------------------------------------------------------
 # Pre-download Flux 2 model (so the server starts ready to generate)
@@ -56,11 +56,11 @@ snapshot_download('diffusers/FLUX.2-dev-bnb-4bit', token=token)
 print('[Hydra] Flux 2 BnB 4-bit checkpoint downloaded.')
 " || echo "[Hydra] WARNING: Flux 2 download failed — will retry on first request"
 
-echo "[Hydra] Downloading TAESD (madebyollin/taef1)..."
+echo "[Hydra] Downloading TAEF2 (madebyollin/taef2)..."
 python3 -c "
-from huggingface_hub import snapshot_download
-snapshot_download('madebyollin/taef1')
-print('[Hydra] TAESD downloaded.')
+from huggingface_hub import hf_hub_download
+hf_hub_download('madebyollin/taef2', 'taef2.safetensors')
+print('[Hydra] TAEF2 downloaded.')
 " 2>/dev/null || true
 
 # ---------------------------------------------------------------------------

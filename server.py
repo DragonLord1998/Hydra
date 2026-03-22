@@ -3,7 +3,7 @@ Hydra -- Character Developer
 
 Flux 2 local inference (pre-quantized checkpoint via diffusers).
 Single model for generation + editing.
-Live latent previews via pipeline VAE decode on CPU.
+Live latent previews via TAEF2 (madebyollin/taef2) on CPU.
 SAM 3D Body for local pose extraction.
 SeedVR2 for local upscaling.
 """
@@ -81,6 +81,7 @@ _lock = threading.Lock()
 _busy_lock = threading.Lock()
 _busy = False
 _flux_pipe = None                       # Flux2Pipeline with NVFP4 transformer
+_taef2_decoder = None                   # TAEF2 tiny decoder for fast previews
 _current_lora: dict | None = None       # {"path", "name", "trigger"}
 _current_image_path: str | None = None  # last generated/edited image
 _sam3d_estimator = None                 # SAM3DBodyEstimator
@@ -142,26 +143,38 @@ def _validate_resolution(width: int, height: int) -> tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
-# Live latent previews (Flux 2 VAE decode)
+# Live latent previews (TAEF2 — tiny autoencoder for Flux 2)
 # ---------------------------------------------------------------------------
-# Flux 2 uses 128-channel packed latents (32 VAE channels × 2×2 patchify),
-# incompatible with TAEF1 (trained on Flux 1's 16 channels).  We decode
-# intermediate previews using the pipeline's own VAE at reduced resolution
-# on CPU, which avoids GPU OOM during the transformer forward pass.
+# Flux 2 uses 128-channel packed latents (32 VAE channels × 2×2 patchify).
+# We use madebyollin/taef2 (~5 MB) for fast CPU decode of intermediate
+# latents during generation, avoiding GPU OOM and full-VAE overhead.
 # ---------------------------------------------------------------------------
+
+def _load_taef2():
+    """Lazily load the TAEF2 decoder on first preview request."""
+    global _taef2_decoder
+    if _taef2_decoder is not None:
+        return
+    try:
+        from huggingface_hub import hf_hub_download
+        from taesd import load_taef2_decoder
+        path = hf_hub_download("madebyollin/taef2", "taef2.safetensors")
+        _taef2_decoder = load_taef2_decoder(path).to(dtype=torch.bfloat16)
+        logger.info("[Hydra] TAEF2 decoder loaded for live previews")
+    except Exception:
+        logger.warning("[Hydra] Failed to load TAEF2 decoder", exc_info=True)
+
 
 def _vae_preview(latents: torch.Tensor, height: int, width: int,
                  size: int = 512) -> str | None:
-    """Decode Flux 2 packed latents via the pipeline's own VAE -> JPEG data URI.
+    """Decode Flux 2 packed latents via TAEF2 -> JPEG data URI.
 
-    Pipeline: unpack packed sequence → BN denormalize → unpatchify → VAE decode.
-    Latents are downscaled before decode for speed (CPU decode of ~32×32 latents).
+    Pipeline: unpack packed sequence → unpatchify → TAEF2 decode on CPU.
     """
     try:
-        if _flux_pipe is None or _flux_pipe.vae is None:
+        _load_taef2()
+        if _taef2_decoder is None:
             return None
-
-        vae = _flux_pipe.vae
 
         with torch.inference_mode():
             lat = latents[:1].detach().cpu().float()
@@ -169,41 +182,30 @@ def _vae_preview(latents: torch.Tensor, height: int, width: int,
             if lat.ndim == 3:
                 # Packed format: (B, seq_len, C) -> spatial (B, C, h/2, w/2)
                 batch_size, seq_len, channels = lat.shape
-                vae_sf = getattr(_flux_pipe, 'vae_scale_factor', 8)
+                vae_sf = getattr(_flux_pipe, 'vae_scale_factor', 8) if _flux_pipe else 8
                 h = 2 * (height // (vae_sf * 2))
                 w = 2 * (width // (vae_sf * 2))
                 spatial = lat.permute(0, 2, 1).reshape(batch_size, channels, h // 2, w // 2)
             else:
                 spatial = lat
 
-            # BatchNorm denormalization (Flux 2 specific -- applied before VAE)
-            if hasattr(vae, 'bn') and vae.bn is not None:
-                bn_mean = vae.bn.running_mean.cpu().view(1, -1, 1, 1).float()
-                bn_var = vae.bn.running_var.cpu().view(1, -1, 1, 1).float()
-                bn_eps = getattr(vae.config, 'batch_norm_eps', 1e-5)
-                spatial = spatial * torch.sqrt(bn_var + bn_eps) + bn_mean
-
-            # Unpatchify: (B, C, H, W) -> (B, C//4, H*2, W*2)
+            # Unpatchify: (B, 128, H, W) -> (B, 32, H*2, W*2)
             b, c, ph, pw = spatial.shape
             if c >= 8:
                 spatial = spatial.reshape(b, c // 4, 2, 2, ph, pw)
                 spatial = spatial.permute(0, 1, 4, 2, 5, 3)
                 spatial = spatial.reshape(b, c // 4, ph * 2, pw * 2)
 
-            # Downscale for fast CPU decode
-            ds = min(32, spatial.shape[2], spatial.shape[3])
-            if spatial.shape[2] > ds or spatial.shape[3] > ds:
+            # Downscale latents for fast CPU decode (64x64 -> 512x512 output)
+            max_lat = 64
+            if spatial.shape[2] > max_lat or spatial.shape[3] > max_lat:
                 spatial = torch.nn.functional.interpolate(
-                    spatial, size=(ds, ds), mode='bilinear', align_corners=False,
+                    spatial, size=(max_lat, max_lat), mode='bilinear', align_corners=False,
                 )
 
-            # Decode on CPU (VAE parameters stay on CPU via model_cpu_offload;
-            # vae.decode() doesn't trigger the offload hook since it isn't forward())
-            spatial = spatial.to(dtype=vae.dtype)
-            decoded = vae.decode(spatial, return_dict=False)[0]
-
-            img = decoded[0].clamp(-1, 1).add(1).div(2)
-            img = img.permute(1, 2, 0).numpy()
+            # TAEF2 decode on CPU — output is [0, 1]
+            decoded = _taef2_decoder(spatial.to(dtype=torch.bfloat16))
+            img = decoded[0].clamp(0, 1).float().permute(1, 2, 0).numpy()
 
         rgb = (img * 255).clip(0, 255).astype(np.uint8)
         preview = Image.fromarray(rgb).resize((size, size), Image.LANCZOS)
@@ -211,7 +213,7 @@ def _vae_preview(latents: torch.Tensor, height: int, width: int,
         preview.save(buf, format="JPEG", quality=70)
         return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
     except Exception:
-        logger.warning("[Hydra] VAE preview failed", exc_info=True)
+        logger.warning("[Hydra] TAEF2 preview failed", exc_info=True)
         return None
 
 
@@ -549,7 +551,9 @@ def generate():
                 if (step_index + 1) % 2 == 0:
                     latents = cb_kwargs.get("latents")
                     if latents is not None:
-                        b64 = _raw_latents_preview(latents, height, width)
+                        b64 = _vae_preview(latents, height, width)
+                        if not b64:
+                            b64 = _raw_latents_preview(latents, height, width)
                         if b64:
                             _broadcast("preview", {
                                 "step": step_index + 1,
@@ -636,7 +640,9 @@ def edit_image():
                 if (step_index + 1) % 2 == 0:
                     latents = cb_kwargs.get("latents")
                     if latents is not None:
-                        b64 = _raw_latents_preview(latents, height, width)
+                        b64 = _vae_preview(latents, height, width)
+                        if not b64:
+                            b64 = _raw_latents_preview(latents, height, width)
                         if b64:
                             _broadcast("preview", {
                                 "step": step_index + 1,
