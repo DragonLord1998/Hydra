@@ -6,9 +6,6 @@ sentencepiece
 transformers
 numpy
 blinker
-# diffusers — install from git main for Flux2Pipeline:
+huggingface_hub
+# diffusers — install from git main for Flux2Pipeline + from_single_file:
 # pip install git+https://github.com/huggingface/diffusers.git
-#
-# TensorRT-LLM visual_gen — for NVFP4 quantization on Blackwell GPUs:
-# pip install tensorrt-llm (feat/visual_gen branch)
-# See: https://github.com/NVIDIA/TensorRT-LLM/tree/feat/visual_gen

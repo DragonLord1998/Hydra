@@ -9,29 +9,15 @@ echo "[Hydra] Installing dependencies..."
 sudo apt-get -y install libopenmpi-dev 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# PyTorch (CUDA 13.0 for Blackwell / TensorRT-LLM compatibility)
+# PyTorch
 # ---------------------------------------------------------------------------
-CUDA_TAG=$(python3 -c "import torch; print('cu' + torch.version.cuda.replace('.','')[:3])" 2>/dev/null || echo "cu130")
+CUDA_TAG=$(python3 -c "import torch; print('cu' + torch.version.cuda.replace('.','')[:3])" 2>/dev/null || echo "cu124")
 echo "[Hydra] Detected CUDA: $CUDA_TAG"
-
-# TensorRT-LLM requires torch 2.9.1 + cu130 — install if not already present
-TORCH_VER=$(python3 -c "import torch; print(torch.__version__)" 2>/dev/null || echo "none")
-echo "[Hydra] Current torch: $TORCH_VER"
-if [[ "$TORCH_VER" != 2.9.* ]]; then
-  echo "[Hydra] Installing PyTorch 2.9.1 (cu130) for TensorRT-LLM..."
-  pip install --quiet torch==2.9.1 torchvision --index-url https://download.pytorch.org/whl/cu130
-fi
+pip uninstall -y torchvision 2>/dev/null || true
+pip install --quiet torchvision --no-deps --index-url "https://download.pytorch.org/whl/${CUDA_TAG}"
 
 # ---------------------------------------------------------------------------
-# TensorRT-LLM (NVFP4 quantization for Blackwell GPUs)
-# ---------------------------------------------------------------------------
-echo "[Hydra] Installing TensorRT-LLM for NVFP4..."
-pip install --quiet --ignore-installed pip setuptools wheel
-pip install --quiet tensorrt_llm 2>/dev/null || \
-  echo "[Hydra] WARNING: TensorRT-LLM install failed — Flux 2 will run in BF16 fallback"
-
-# ---------------------------------------------------------------------------
-# Diffusers (from git main for Flux2Pipeline)
+# Diffusers (from git main for Flux2Pipeline + from_single_file NVFP4 support)
 # ---------------------------------------------------------------------------
 pip install --quiet git+https://github.com/huggingface/diffusers.git
 
@@ -43,13 +29,21 @@ pip install --quiet flask Pillow accelerate sentencepiece transformers numpy --i
 # ---------------------------------------------------------------------------
 # Pre-download Flux 2 model (so the server starts ready to generate)
 # ---------------------------------------------------------------------------
-echo "[Hydra] Downloading Flux 2 model (black-forest-labs/FLUX.2-dev)..."
+echo "[Hydra] Downloading Flux 2 NVFP4 checkpoint (22GB pre-quantized)..."
 python3 -c "
-from huggingface_hub import snapshot_download
+from huggingface_hub import snapshot_download, hf_hub_download
 import os
 token = os.environ.get('HF_TOKEN')
-snapshot_download('black-forest-labs/FLUX.2-dev', token=token)
-print('[Hydra] Flux 2 model downloaded.')
+
+# Download the pre-quantized NVFP4 transformer (22GB — mixed precision for best quality)
+hf_hub_download('black-forest-labs/FLUX.2-dev-NVFP4',
+                'flux2-dev-nvfp4-mixed.safetensors', token=token)
+
+# Download pipeline components (VAE, text encoder, scheduler, tokenizer) from the base repo
+snapshot_download('black-forest-labs/FLUX.2-dev', token=token,
+                  ignore_patterns=['flux2-dev.safetensors', '*.png'])
+
+print('[Hydra] Flux 2 NVFP4 model downloaded.')
 " || echo "[Hydra] WARNING: Flux 2 download failed — will retry on first request"
 
 echo "[Hydra] Downloading TAESD (madebyollin/taef1)..."

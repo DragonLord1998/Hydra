@@ -1,7 +1,7 @@
 """
 Hydra -- Character Developer
 
-Flux 2 NVFP4 local inference via TensorRT-LLM visual_gen.
+Flux 2 NVFP4 local inference (pre-quantized checkpoint via diffusers).
 Single model for generation + editing.
 TAESD-accelerated live latent previews.
 SAM 3D Body for local pose extraction.
@@ -56,9 +56,6 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 MAX_SSE_CONNECTIONS = 10
 MAX_PROMPT_LENGTH = 2000
 MAX_PIXELS = 4_000_000  # 4 megapixels
-
-# NVFP4 quantization: exclude these layers (keep in BF16 for quality)
-NVFP4_EXCLUDE_PATTERN = r".*embedder|norm_out|proj_out|to_add_out|to_added_qkv|stream.*"
 
 SAM3D_CHECKPOINT = os.environ.get(
     "SAM3D_CHECKPOINT",
@@ -338,7 +335,7 @@ def _unload_sam3d():
 
 
 # ---------------------------------------------------------------------------
-# Flux 2 NVFP4 model lifecycle (TensorRT-LLM visual_gen)
+# Flux 2 NVFP4 model lifecycle
 # ---------------------------------------------------------------------------
 
 def _unload_flux():
@@ -352,60 +349,37 @@ def _unload_flux():
 
 
 def _load_flux():
-    """Load Flux 2 with NVFP4 quantization via TensorRT-LLM visual_gen."""
+    """Load Flux 2 NVFP4 from the official pre-quantized checkpoint."""
     global _flux_pipe
     if _flux_pipe is not None:
         return
 
     _unload_sam3d()
 
-    from diffusers import Flux2Pipeline, Flux2Transformer2DModel
+    from diffusers import Flux2Pipeline
 
-    logger.info("[Hydra] Loading Flux 2 transformer from %s ...", FLUX2_MODEL)
+    logger.info("[Hydra] Loading Flux 2 NVFP4 from %s ...", FLUX2_NVFP4_REPO)
     _broadcast("model_status", {"action": "loading", "name": "Flux 2 NVFP4"}, priority=True)
 
-    # Load the transformer in BF16 first
-    transformer = Flux2Transformer2DModel.from_pretrained(
-        FLUX2_MODEL, subfolder="transformer",
-        torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, token=HF_TOKEN,
+    # Load the pre-quantized NVFP4 checkpoint directly via from_single_file.
+    # The mixed variant keeps sensitive layers (embedders, norms) in BF16
+    # for near-FP8 precision while the bulk runs in NVFP4.
+    from huggingface_hub import hf_hub_download
+    nvfp4_path = hf_hub_download(
+        FLUX2_NVFP4_REPO,
+        "flux2-dev-nvfp4-mixed.safetensors",
+        token=HF_TOKEN,
     )
 
-    # Apply NVFP4 quantization via TensorRT-LLM visual_gen
-    # Sensitive layers (embedders, norms, projections) stay in BF16
-    try:
-        import visual_gen
-        from visual_gen.layers import apply_visual_gen_linear
-
-        logger.info("[Hydra] Applying NVFP4 quantization...")
-        _broadcast("model_status", {
-            "action": "loading", "name": "Applying NVFP4 quantization...",
-        }, priority=True)
-
-        apply_visual_gen_linear(
-            transformer,
-            load_parameters=True,
-            quantize_weights=True,
-            exclude_pattern=NVFP4_EXCLUDE_PATTERN,
-        )
-        logger.info("[Hydra] NVFP4 quantization applied.")
-    except ImportError:
-        logger.warning(
-            "[Hydra] TensorRT-LLM visual_gen not found — running in BF16. "
-            "Install from: pip install tensorrt-llm (feat/visual_gen branch)"
-        )
-
-    # Build the full pipeline with the (quantized) transformer
-    logger.info("[Hydra] Loading Flux 2 pipeline components...")
-    _flux_pipe = Flux2Pipeline.from_pretrained(
-        FLUX2_MODEL,
-        transformer=transformer,
+    _flux_pipe = Flux2Pipeline.from_single_file(
+        nvfp4_path,
+        config=FLUX2_MODEL,  # pipeline configs (VAE, scheduler, tokenizer) from base repo
         torch_dtype=torch.bfloat16,
-        low_cpu_mem_usage=True,
         token=HF_TOKEN,
     )
     _flux_pipe.enable_model_cpu_offload()
 
-    # BF16 VAE doesn't need the fp32 upcast
+    # BF16 VAE: skip costly fp32 upcast (bf16 has same exponent range as fp32)
     if _flux_pipe.vae is not None and _flux_pipe.dtype == torch.bfloat16:
         _flux_pipe.vae.config.force_upcast = False
 
@@ -414,7 +388,7 @@ def _load_flux():
         logger.info("[Hydra] Loading LoRA: %s", _current_lora["name"])
         _flux_pipe.load_lora_weights(_current_lora["path"])
 
-    # Warmup pass — triggers CUDA kernel compilation and offload hooks
+    # Warmup pass -- triggers CUDA kernel compilation and offload hooks
     logger.info("[Hydra] Warmup pass...")
     _broadcast("model_status", {"action": "loading", "name": "Warming up Flux 2..."}, priority=True)
     try:
