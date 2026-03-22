@@ -549,9 +549,7 @@ def generate():
                 if (step_index + 1) % 2 == 0:
                     latents = cb_kwargs.get("latents")
                     if latents is not None:
-                        b64 = _vae_preview(latents, height, width)
-                        if not b64:
-                            b64 = _raw_latents_preview(latents, height, width)
+                        b64 = _raw_latents_preview(latents, height, width)
                         if b64:
                             _broadcast("preview", {
                                 "step": step_index + 1,
@@ -638,9 +636,7 @@ def edit_image():
                 if (step_index + 1) % 2 == 0:
                     latents = cb_kwargs.get("latents")
                     if latents is not None:
-                        b64 = _vae_preview(latents, height, width)
-                        if not b64:
-                            b64 = _raw_latents_preview(latents, height, width)
+                        b64 = _raw_latents_preview(latents, height, width)
                         if b64:
                             _broadcast("preview", {
                                 "step": step_index + 1,
