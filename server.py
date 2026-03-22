@@ -1,7 +1,9 @@
 """
 Hydra -- Character Developer
 
-Flux 2 (NVFP4) generation & editing via fal.ai API -- single unified model.
+Flux 2 NVFP4 local inference via TensorRT-LLM visual_gen.
+Single model for generation + editing.
+TAESD-accelerated live latent previews.
 SAM 3D Body for local pose extraction.
 SeedVR2 for local upscaling.
 """
@@ -19,23 +21,13 @@ import struct
 import threading
 import time
 import uuid
-import urllib.request
 from pathlib import Path
 
-import fal_client
+import numpy as np
+import torch
 from flask import Flask, Response, jsonify, request, send_from_directory
 from PIL import Image
 from werkzeug.utils import secure_filename
-
-# Optional: torch/numpy for SAM 3D Body pose extraction
-try:
-    import torch
-    import numpy as np
-    HAS_TORCH = True
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-except ImportError:
-    HAS_TORCH = False
-    DEVICE = "cpu"
 
 logger = logging.getLogger(__name__)
 
@@ -52,21 +44,22 @@ OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", str(BASE_DIR / "outputs")))
 LORA_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+# Model paths
+FLUX2_MODEL = os.environ.get("FLUX2_MODEL", "black-forest-labs/FLUX.2-dev")
+FLUX2_NVFP4_REPO = os.environ.get("FLUX2_NVFP4_REPO", "black-forest-labs/FLUX.2-dev-NVFP4")
+TAESD_MODEL = os.environ.get("TAESD_MODEL", "madebyollin/taef1")
 SEEDVR2_CLI = os.environ.get("SEEDVR2_CLI", "/workspace/seedvr2/inference_cli.py")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 HYDRA_API_KEY = os.environ.get("HYDRA_API_KEY")  # optional auth
 
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 MAX_SSE_CONNECTIONS = 10
 MAX_PROMPT_LENGTH = 2000
 MAX_PIXELS = 4_000_000  # 4 megapixels
 
-# Flux 2 API endpoints (fal.ai -- backed by FLUX.2-dev / NVFP4)
-FAL_GENERATE = "fal-ai/flux-2"
-FAL_EDIT = "fal-ai/flux-2/edit"
-FAL_LORA_GENERATE = "fal-ai/flux-2/lora"
-FAL_LORA_EDIT = "fal-ai/flux-2/lora/edit"
+# NVFP4 quantization: exclude these layers (keep in BF16 for quality)
+NVFP4_EXCLUDE_PATTERN = r".*embedder|norm_out|proj_out|to_add_out|to_added_qkv|stream.*"
 
-# SAM 3D Body checkpoint
 SAM3D_CHECKPOINT = os.environ.get(
     "SAM3D_CHECKPOINT",
     str(BASE_DIR / "checkpoints" / "sam-3d-body-dinov3"),
@@ -89,10 +82,12 @@ def require_auth(f):
 
 _lock = threading.Lock()
 _busy_lock = threading.Lock()
-_busy = False                           # True while a fal.ai request is in flight
-_current_lora: dict | None = None       # {"path", "name", "trigger", "fal_url"}
+_busy = False
+_flux_pipe = None                       # Flux2Pipeline with NVFP4 transformer
+_taesd = None                           # AutoencoderTiny for live previews
+_current_lora: dict | None = None       # {"path", "name", "trigger"}
 _current_image_path: str | None = None  # last generated/edited image
-_sam3d_estimator = None                 # SAM3DBodyEstimator (local)
+_sam3d_estimator = None                 # SAM3DBodyEstimator
 
 # SSE subscribers
 _subscribers: list[queue.Queue] = []
@@ -100,10 +95,7 @@ _sub_lock = threading.Lock()
 
 
 def _broadcast(event_type: str, data: dict, priority: bool = False) -> None:
-    """Push an SSE event to all connected subscribers.
-
-    When *priority* is True, drop oldest events from full queues to make room.
-    """
+    """Push an SSE event to all connected subscribers."""
     payload = f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
     with _sub_lock:
         for q in list(_subscribers):
@@ -118,77 +110,8 @@ def _broadcast(event_type: str, data: dict, priority: bool = False) -> None:
                 pass
 
 
-# ---------------------------------------------------------------------------
-# Resolution validation (Flux 2: max 4MP, multiples of 16, max 4096 per dim)
-# ---------------------------------------------------------------------------
-
-def _validate_resolution(width: int, height: int) -> tuple[int, int]:
-    """Clamp to valid Flux 2 resolution."""
-    width = max(256, min(4096, width))
-    height = max(256, min(4096, height))
-    # Round to multiples of 16
-    width = (width // 16) * 16
-    height = (height // 16) * 16
-    # Enforce 4MP limit
-    pixels = width * height
-    if pixels > MAX_PIXELS:
-        scale = (MAX_PIXELS / pixels) ** 0.5
-        width = (int(width * scale) // 16) * 16
-        height = (int(height * scale) // 16) * 16
-    return max(256, width), max(256, height)
-
-
-# ---------------------------------------------------------------------------
-# fal.ai helpers
-# ---------------------------------------------------------------------------
-
-def _fal_progress_callback():
-    """Create a callback for fal.ai queue updates that broadcasts SSE."""
-    def on_update(update):
-        if hasattr(update, "position"):
-            _broadcast("model_status", {
-                "action": "loading",
-                "name": f"Flux 2 (queued #{update.position})",
-            }, priority=True)
-        elif hasattr(update, "logs"):
-            _broadcast("model_status", {
-                "action": "loading",
-                "name": "Flux 2 (generating...)",
-            }, priority=True)
-    return on_update
-
-
-def _upload_to_fal(local_path: str) -> str:
-    """Upload a local file to fal.ai temporary storage."""
-    return fal_client.upload_file(local_path)
-
-
-ALLOWED_FAL_HOSTS = {"fal.media", "v3.fal.media", "fal-cdn.batuhan.co", "storage.googleapis.com"}
-
-
-def _download_fal_image(url: str) -> tuple[str, Path]:
-    """Download image from fal.ai CDN and save to OUTPUT_DIR."""
-    import urllib.parse
-    parsed = urllib.parse.urlparse(url)
-    if parsed.hostname not in ALLOWED_FAL_HOSTS:
-        raise ValueError(f"Unexpected image host: {parsed.hostname}")
-    filename = f"{uuid.uuid4().hex[:12]}.png"
-    out_path = OUTPUT_DIR / filename
-    req = urllib.request.Request(url)
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        out_path.write_bytes(resp.read())
-    return f"/outputs/{filename}", out_path
-
-
-def _require_fal_key():
-    """Return an error response if FAL_KEY is not configured."""
-    if not os.environ.get("FAL_KEY"):
-        return jsonify({"error": "FAL_KEY not configured. Set your fal.ai API key: export FAL_KEY=your_key"}), 503
-    return None
-
-
 def _try_acquire_busy():
-    """Atomically check and set _busy. Returns True if acquired, False if already busy."""
+    """Atomically check and set _busy."""
     global _busy
     with _busy_lock:
         if _busy:
@@ -202,6 +125,127 @@ def _release_busy():
     global _busy
     with _busy_lock:
         _busy = False
+
+
+# ---------------------------------------------------------------------------
+# Resolution validation (Flux 2: max 4MP, multiples of 16, max 4096 per dim)
+# ---------------------------------------------------------------------------
+
+def _validate_resolution(width: int, height: int) -> tuple[int, int]:
+    """Clamp to valid Flux 2 resolution."""
+    width = max(256, min(4096, width))
+    height = max(256, min(4096, height))
+    width = (width // 16) * 16
+    height = (height // 16) * 16
+    pixels = width * height
+    if pixels > MAX_PIXELS:
+        scale = (MAX_PIXELS / pixels) ** 0.5
+        width = (int(width * scale) // 16) * 16
+        height = (int(height * scale) // 16) * 16
+    return max(256, width), max(256, height)
+
+
+# ---------------------------------------------------------------------------
+# TAESD -- tiny autoencoder for live latent previews
+# ---------------------------------------------------------------------------
+
+def _load_taesd():
+    """Lazy-load TAESD (~2MB). Stays resident on GPU."""
+    global _taesd
+    if _taesd is not None:
+        return
+
+    import logging as _logging
+    from diffusers import AutoencoderTiny
+
+    logger.info("[Hydra] Loading TAESD from %s ...", TAESD_MODEL)
+    _diffusers_logger = _logging.getLogger("diffusers.configuration_utils")
+    _prev_level = _diffusers_logger.level
+    _diffusers_logger.setLevel(_logging.ERROR)
+    try:
+        _taesd = AutoencoderTiny.from_pretrained(
+            TAESD_MODEL, torch_dtype=torch.bfloat16, token=HF_TOKEN,
+        ).to(DEVICE)
+    finally:
+        _diffusers_logger.setLevel(_prev_level)
+    _taesd.eval()
+    logger.info("[Hydra] TAESD ready.")
+
+
+def _unpack_latents(latents: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    """Unpack Flux packed latents (B, seq, 64) -> spatial (B, 16, H, W)."""
+    batch_size, _num_patches, channels = latents.shape
+    vae_scale_factor = 8
+    h = 2 * (height // (vae_scale_factor * 2))
+    w = 2 * (width // (vae_scale_factor * 2))
+    latents = latents.view(batch_size, h // 2, w // 2, channels // 4, 2, 2)
+    latents = latents.permute(0, 3, 1, 4, 2, 5)
+    latents = latents.reshape(batch_size, channels // 4, h, w)
+    return latents
+
+
+def _taesd_preview(latents: torch.Tensor, height: int, width: int,
+                   size: int = 512) -> str | None:
+    """Decode packed Flux latents via TAESD -> JPEG data URI."""
+    try:
+        _load_taesd()
+        with torch.inference_mode():
+            lat = latents[:1].detach()
+            if lat.ndim == 3:
+                spatial = _unpack_latents(lat, height, width)
+            else:
+                spatial = lat
+            spatial = spatial.to(device=DEVICE, dtype=torch.bfloat16)
+            decoded = _taesd.decode(spatial, return_dict=False)[0]
+            del spatial
+
+        img = decoded[0].clamp(-1, 1).add(1).div(2)
+        img = img.float().cpu().permute(1, 2, 0).numpy()
+        del decoded
+        rgb = (img * 255).clip(0, 255).astype(np.uint8)
+        del img
+        preview = Image.fromarray(rgb).resize((size, size), Image.LANCZOS)
+        del rgb
+        buf = io.BytesIO()
+        preview.save(buf, format="JPEG", quality=70)
+        return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        logger.debug("[Hydra] TAESD preview failed, falling back to raw", exc_info=True)
+        return None
+
+
+def _raw_latents_preview(latents: torch.Tensor, size: int = 256) -> str | None:
+    """Approximate RGB preview from raw latent channels (fallback)."""
+    try:
+        if latents.dim() == 3:
+            _b, seq_len, _c = latents.shape
+            h = w = int(seq_len ** 0.5)
+            if h * w < seq_len:
+                h += 1
+            usable = min(h * w, seq_len)
+            lat = latents[0, :usable, :3].detach().float().cpu()
+            rows = min(h, int(usable ** 0.5) + 1)
+            lat = lat.reshape(rows, -1, 3)[:h, :w, :]
+        elif latents.dim() == 4:
+            lat = latents[0, :3].detach().float().cpu().permute(1, 2, 0)
+        else:
+            return None
+
+        vmin, vmax = lat.min(), lat.max()
+        if (vmax - vmin) > 1e-8:
+            lat = (lat - vmin) / (vmax - vmin)
+        else:
+            lat = torch.full_like(lat, 0.5)
+
+        rgb = (lat.numpy() * 255).clip(0, 255).astype(np.uint8)
+        del lat
+        preview = Image.fromarray(rgb).resize((size, size), Image.LANCZOS)
+        del rgb
+        buf = io.BytesIO()
+        preview.save(buf, format="JPEG", quality=60)
+        return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +292,7 @@ MHR70_IK_CHAINS = [
 
 
 # ---------------------------------------------------------------------------
-# SAM 3D Body -- pose extraction (local, needs torch)
+# SAM 3D Body -- pose extraction (local)
 # ---------------------------------------------------------------------------
 
 def _load_sam3d():
@@ -256,8 +300,7 @@ def _load_sam3d():
     if _sam3d_estimator is not None:
         return
 
-    if not HAS_TORCH:
-        raise RuntimeError("torch not installed -- pose extraction unavailable")
+    _unload_flux()
 
     try:
         from sam_3d_body import load_sam_3d_body, SAM3DBodyEstimator
@@ -289,10 +332,106 @@ def _unload_sam3d():
     if _sam3d_estimator is not None:
         del _sam3d_estimator
         _sam3d_estimator = None
-        if HAS_TORCH:
-            torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
         gc.collect()
         logger.info("[Hydra] SAM 3D Body unloaded.")
+
+
+# ---------------------------------------------------------------------------
+# Flux 2 NVFP4 model lifecycle (TensorRT-LLM visual_gen)
+# ---------------------------------------------------------------------------
+
+def _unload_flux():
+    global _flux_pipe
+    if _flux_pipe is not None:
+        del _flux_pipe
+        _flux_pipe = None
+        torch.cuda.empty_cache()
+        gc.collect()
+        logger.info("[Hydra] Flux 2 NVFP4 pipeline unloaded.")
+
+
+def _load_flux():
+    """Load Flux 2 with NVFP4 quantization via TensorRT-LLM visual_gen."""
+    global _flux_pipe
+    if _flux_pipe is not None:
+        return
+
+    _unload_sam3d()
+
+    from diffusers import Flux2Pipeline, Flux2Transformer2DModel
+
+    logger.info("[Hydra] Loading Flux 2 transformer from %s ...", FLUX2_MODEL)
+    _broadcast("model_status", {"action": "loading", "name": "Flux 2 NVFP4"}, priority=True)
+
+    # Load the transformer in BF16 first
+    transformer = Flux2Transformer2DModel.from_pretrained(
+        FLUX2_MODEL, subfolder="transformer",
+        torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, token=HF_TOKEN,
+    )
+
+    # Apply NVFP4 quantization via TensorRT-LLM visual_gen
+    # Sensitive layers (embedders, norms, projections) stay in BF16
+    try:
+        import visual_gen
+        from visual_gen.layers import apply_visual_gen_linear
+
+        logger.info("[Hydra] Applying NVFP4 quantization...")
+        _broadcast("model_status", {
+            "action": "loading", "name": "Applying NVFP4 quantization...",
+        }, priority=True)
+
+        apply_visual_gen_linear(
+            transformer,
+            load_parameters=True,
+            quantize_weights=True,
+            exclude_pattern=NVFP4_EXCLUDE_PATTERN,
+        )
+        logger.info("[Hydra] NVFP4 quantization applied.")
+    except ImportError:
+        logger.warning(
+            "[Hydra] TensorRT-LLM visual_gen not found — running in BF16. "
+            "Install from: pip install tensorrt-llm (feat/visual_gen branch)"
+        )
+
+    # Build the full pipeline with the (quantized) transformer
+    logger.info("[Hydra] Loading Flux 2 pipeline components...")
+    _flux_pipe = Flux2Pipeline.from_pretrained(
+        FLUX2_MODEL,
+        transformer=transformer,
+        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
+        token=HF_TOKEN,
+    )
+    _flux_pipe.enable_model_cpu_offload()
+
+    # BF16 VAE doesn't need the fp32 upcast
+    if _flux_pipe.vae is not None and _flux_pipe.dtype == torch.bfloat16:
+        _flux_pipe.vae.config.force_upcast = False
+
+    # Apply LoRA if one was uploaded
+    if _current_lora:
+        logger.info("[Hydra] Loading LoRA: %s", _current_lora["name"])
+        _flux_pipe.load_lora_weights(_current_lora["path"])
+
+    # Warmup pass — triggers CUDA kernel compilation and offload hooks
+    logger.info("[Hydra] Warmup pass...")
+    _broadcast("model_status", {"action": "loading", "name": "Warming up Flux 2..."}, priority=True)
+    try:
+        with torch.inference_mode():
+            _flux_pipe(
+                prompt="warmup",
+                height=256, width=256,
+                num_inference_steps=1,
+                guidance_scale=0.0,
+            )
+    except Exception:
+        logger.debug("[Hydra] Warmup failed (non-fatal)", exc_info=True)
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    logger.info("[Hydra] Flux 2 NVFP4 pipeline ready.")
+    _broadcast("model_status", {"action": "ready", "name": "Flux 2 NVFP4"}, priority=True)
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +465,6 @@ def upload_lora():
     if not file or not file.filename.endswith(".safetensors"):
         return jsonify({"error": "Upload a .safetensors file"}), 400
 
-    # Validate safetensors header
     header = file.stream.read(8)
     if len(header) < 8:
         return jsonify({"error": "Invalid safetensors file"}), 400
@@ -339,21 +477,15 @@ def upload_lora():
     save_path = LORA_DIR / filename
     file.save(str(save_path))
 
-    # Upload to fal.ai storage so the API can access it
-    try:
-        fal_url = _upload_to_fal(str(save_path))
-        logger.info("[Hydra] LoRA uploaded to fal.ai: %s", filename)
-    except Exception as exc:
-        logger.error("[Hydra] LoRA fal.ai upload failed: %s", exc)
-        return jsonify({"error": "LoRA saved but fal.ai upload failed — it will not be applied to generation"}), 500
-
     with _lock:
-        _current_lora = {
-            "path": str(save_path),
-            "name": filename,
-            "trigger": trigger,
-            "fal_url": fal_url,
-        }
+        _current_lora = {"path": str(save_path), "name": filename, "trigger": trigger}
+        if _flux_pipe is not None:
+            try:
+                _flux_pipe.unload_lora_weights()
+            except Exception:
+                pass
+            _flux_pipe.load_lora_weights(str(save_path))
+            logger.info("[Hydra] LoRA hot-swapped: %s", filename)
 
     return jsonify({"name": filename, "trigger": trigger})
 
@@ -395,11 +527,7 @@ def upload_image():
 @app.route("/api/generate", methods=["POST"])
 @require_auth
 def generate():
-    global _current_image_path, _busy
-
-    fal_err = _require_fal_key()
-    if fal_err:
-        return fal_err
+    global _current_image_path
 
     if not _try_acquire_busy():
         return jsonify({"error": "Generation already in progress"}), 429
@@ -407,6 +535,7 @@ def generate():
     data = request.get_json(silent=True) or {}
     prompt = (data.get("prompt") or "").strip()[:MAX_PROMPT_LENGTH]
     if not prompt:
+        _release_busy()
         return jsonify({"error": "Prompt is required"}), 400
 
     seed = data.get("seed", int(time.time()) % (2**32))
@@ -414,59 +543,67 @@ def generate():
     try:
         width = int(data.get("width", 1024))
         height = int(data.get("height", 1024))
-        steps = min(max(int(data.get("steps", 28)), 1), 50)
-        guidance = min(max(float(data.get("cfg", 3.5)), 1), 20)
+        total_steps = min(max(int(data.get("steps", 50)), 1), 100)
+        guidance = min(max(float(data.get("cfg", 4.0)), 0), 20)
     except (ValueError, TypeError):
+        _release_busy()
         return jsonify({"error": "Invalid width, height, steps, or cfg value"}), 400
 
     width, height = _validate_resolution(width, height)
 
-    # Choose endpoint: LoRA or standard
-    has_lora = _current_lora and _current_lora.get("fal_url")
-    endpoint = FAL_LORA_GENERATE if has_lora else FAL_GENERATE
-
-    args = {
-        "prompt": prompt,
-        "image_size": {"width": width, "height": height},
-        "num_inference_steps": steps,
-        "guidance_scale": guidance,
-        "seed": seed,
-        "num_images": 1,
-        "output_format": "png",
-    }
-
-    if has_lora:
-        args["loras"] = [{"path": _current_lora["fal_url"], "scale": 1.0}]
-
-    _broadcast("model_status", {"action": "loading", "name": "Flux 2"}, priority=True)
-
     try:
-        result = fal_client.subscribe(
-            endpoint,
-            arguments=args,
-            with_logs=True,
-            on_queue_update=_fal_progress_callback(),
-        )
-
-        images = result.get("images") or result.get("output", {}).get("images")
-        if not images:
-            _broadcast("error", {"message": "No images returned"}, priority=True)
-            return jsonify({"error": "No images returned"}), 500
-
-        local_url, local_path = _download_fal_image(images[0]["url"])
-
         with _lock:
-            _current_image_path = str(local_path)
+            _load_flux()
+            _load_taesd()
 
-        _broadcast("model_status", {"action": "ready", "name": "Flux 2"}, priority=True)
-        return jsonify({
-            "image_url": local_url,
-            "seed": result.get("seed", seed),
-        })
-    except Exception as exc:
-        logger.exception("[Hydra] Generation failed")
-        _broadcast("error", {"message": "Generation failed"}, priority=True)
-        return jsonify({"error": f"Generation failed: {exc}"}), 500
+            generator = torch.Generator(DEVICE).manual_seed(seed)
+
+            def _on_step(pipe, step_index, timestep, cb_kwargs):
+                if (step_index + 1) % 2 == 0:
+                    latents = cb_kwargs.get("latents")
+                    if latents is not None:
+                        b64 = _taesd_preview(latents, height, width)
+                        if not b64:
+                            b64 = _raw_latents_preview(latents)
+                        if b64:
+                            _broadcast("preview", {
+                                "step": step_index + 1,
+                                "total": total_steps,
+                                "image": b64,
+                            })
+                if step_index + 1 >= total_steps:
+                    _broadcast("model_status", {
+                        "action": "loading", "name": "Decoding final image...",
+                    }, priority=True)
+                return cb_kwargs
+
+            try:
+                with torch.inference_mode():
+                    result = _flux_pipe(
+                        prompt=prompt,
+                        height=height,
+                        width=width,
+                        num_inference_steps=total_steps,
+                        guidance_scale=guidance,
+                        generator=generator,
+                        callback_on_step_end=_on_step,
+                        callback_on_step_end_tensor_inputs=["latents"],
+                    ).images[0]
+            except Exception:
+                logger.exception("[Hydra] Generation failed")
+                _broadcast("error", {"message": "Generation failed"}, priority=True)
+                return jsonify({"error": "Generation failed"}), 500
+            finally:
+                torch.cuda.empty_cache()
+                gc.collect()
+
+            filename = f"{uuid.uuid4().hex[:12]}.png"
+            out = OUTPUT_DIR / filename
+            result.save(str(out))
+            _current_image_path = str(out)
+
+        _broadcast("model_status", {"action": "ready", "name": "Flux 2 NVFP4"}, priority=True)
+        return jsonify({"image_url": f"/outputs/{filename}", "seed": seed})
     finally:
         _release_busy()
 
@@ -474,11 +611,7 @@ def generate():
 @app.route("/api/edit", methods=["POST"])
 @require_auth
 def edit_image():
-    global _current_image_path, _busy
-
-    fal_err = _require_fal_key()
-    if fal_err:
-        return fal_err
+    global _current_image_path
 
     if not _try_acquire_busy():
         return jsonify({"error": "Generation already in progress"}), 429
@@ -486,69 +619,75 @@ def edit_image():
     data = request.get_json(silent=True) or {}
     instruction = (data.get("prompt") or "").strip()[:MAX_PROMPT_LENGTH]
     if not instruction:
+        _release_busy()
         return jsonify({"error": "Edit instruction is required"}), 400
 
-    # Allow selecting a specific source image from the canvas
     source_image = data.get("source_image")
     if source_image:
         fname = Path(source_image).name
         if re.match(r"^[a-f0-9]{12}\.png$", fname):
             candidate = OUTPUT_DIR / fname
             if candidate.is_file():
-                with _lock:
-                    _current_image_path = str(candidate)
+                _current_image_path = str(candidate)
 
     if not _current_image_path or not os.path.isfile(_current_image_path):
+        _release_busy()
         return jsonify({"error": "Generate or upload an image first"}), 400
 
     try:
-        steps = min(max(int(data.get("steps", 28)), 1), 50)
+        edit_steps = min(max(int(data.get("steps", 50)), 1), 100)
     except (ValueError, TypeError):
+        _release_busy()
         return jsonify({"error": "Invalid steps value"}), 400
 
-    _broadcast("model_status", {"action": "loading", "name": "Flux 2 Edit"}, priority=True)
-
     try:
-        # Upload source image to fal.ai storage
-        fal_image_url = _upload_to_fal(_current_image_path)
-
-        has_lora = _current_lora and _current_lora.get("fal_url")
-        endpoint = FAL_LORA_EDIT if has_lora else FAL_EDIT
-
-        args = {
-            "prompt": instruction,
-            "image_url": fal_image_url,
-            "num_inference_steps": steps,
-            "guidance_scale": 3.5,
-            "output_format": "png",
-        }
-
-        if has_lora:
-            args["loras"] = [{"path": _current_lora["fal_url"], "scale": 1.0}]
-
-        result = fal_client.subscribe(
-            endpoint,
-            arguments=args,
-            with_logs=True,
-            on_queue_update=_fal_progress_callback(),
-        )
-
-        images = result.get("images") or result.get("output", {}).get("images")
-        if not images:
-            _broadcast("error", {"message": "No images returned"}, priority=True)
-            return jsonify({"error": "No images returned"}), 500
-
-        local_url, local_path = _download_fal_image(images[0]["url"])
-
         with _lock:
-            _current_image_path = str(local_path)
+            _load_flux()
 
-        _broadcast("model_status", {"action": "ready", "name": "Flux 2 Edit"}, priority=True)
-        return jsonify({"image_url": local_url})
-    except Exception as exc:
-        logger.exception("[Hydra] Edit failed")
-        _broadcast("error", {"message": "Edit failed"}, priority=True)
-        return jsonify({"error": f"Edit failed: {exc}"}), 500
+            source = Image.open(_current_image_path).convert("RGB")
+
+            def _on_edit_step(pipe, step_index, timestep, cb_kwargs):
+                if (step_index + 1) % 2 == 0:
+                    latents = cb_kwargs.get("latents")
+                    if latents is not None:
+                        b64 = _raw_latents_preview(latents)
+                        if b64:
+                            _broadcast("preview", {
+                                "step": step_index + 1,
+                                "total": edit_steps,
+                                "image": b64,
+                            })
+                return cb_kwargs
+
+            try:
+                with torch.inference_mode():
+                    result = _flux_pipe(
+                        image=[source],
+                        prompt=instruction,
+                        num_inference_steps=edit_steps,
+                        guidance_scale=2.5,
+                        generator=torch.Generator(DEVICE).manual_seed(
+                            int(time.time()) % (2**32)
+                        ),
+                        callback_on_step_end=_on_edit_step,
+                        callback_on_step_end_tensor_inputs=["latents"],
+                    ).images[0]
+            except Exception:
+                logger.exception("[Hydra] Edit failed")
+                _broadcast("error", {"message": "Edit failed"}, priority=True)
+                return jsonify({"error": "Edit failed"}), 500
+            finally:
+                del source
+                torch.cuda.empty_cache()
+                gc.collect()
+
+            filename = f"{uuid.uuid4().hex[:12]}.png"
+            out = OUTPUT_DIR / filename
+            result.save(str(out))
+            _current_image_path = str(out)
+
+        _broadcast("model_status", {"action": "ready", "name": "Flux 2 NVFP4"}, priority=True)
+        return jsonify({"image_url": f"/outputs/{filename}"})
     finally:
         _release_busy()
 
@@ -615,7 +754,6 @@ def upscale_image():
                     result_pngs.append(Path(root) / f)
 
         if not result_pngs:
-            logger.error("[Hydra] SeedVR2 produced no output in %s", tmp_dir)
             _broadcast("error", {"message": "Upscale produced no output"}, priority=True)
             return jsonify({"error": "Upscale produced no output"}), 500
 
@@ -624,7 +762,6 @@ def upscale_image():
         shutil.move(str(result_pngs[0]), str(out_path))
 
         _broadcast("model_status", {"action": "ready", "name": "SeedVR2 Upscaler"}, priority=True)
-        logger.info("[Hydra] Upscale complete: %s -> %s", fname, out_filename)
         return jsonify({"image_url": f"/outputs/{out_filename}"})
 
     except subprocess.TimeoutExpired:
@@ -676,10 +813,9 @@ def extract_pose():
     person = outputs[0]
     kp3d = person["pred_keypoints_3d"]
 
-    if HAS_TORCH and torch.is_tensor(kp3d):
+    if torch.is_tensor(kp3d):
         kp3d = kp3d.detach().cpu().numpy()
-    if hasattr(kp3d, "tolist"):
-        kp3d = kp3d.tolist()
+    kp3d = kp3d.tolist()
 
     joints = []
     for i, name in enumerate(MHR70_NAMES):
@@ -702,29 +838,35 @@ def extract_pose():
 @app.route("/api/generate-posed", methods=["POST"])
 @require_auth
 def generate_posed():
-    """Re-generate a character in a new pose using Flux 2 Edit."""
-    global _current_image_path, _busy
+    """Re-generate a character in a new pose using Flux 2 multi-reference."""
+    global _current_image_path
+
+    if not _try_acquire_busy():
+        return jsonify({"error": "Generation already in progress"}), 429
 
     data = request.get_json(silent=True) or {}
     prompt = (data.get("prompt") or "").strip()[:MAX_PROMPT_LENGTH]
     character_image = data.get("character_image")
-    pose_image_b64 = data.get("pose_image")  # base64 data URI from Three.js
+    pose_image_b64 = data.get("pose_image")
 
     if not character_image:
+        _release_busy()
         return jsonify({"error": "character_image is required"}), 400
     if not pose_image_b64:
+        _release_busy()
         return jsonify({"error": "pose_image is required"}), 400
 
-    # Resolve character image
     char_fname = Path(character_image).name
     if not re.match(r"^[a-f0-9]{12}\.png$", char_fname):
+        _release_busy()
         return jsonify({"error": "Invalid character image"}), 400
     char_path = OUTPUT_DIR / char_fname
     if not char_path.is_file():
+        _release_busy()
         return jsonify({"error": "Character image not found"}), 400
 
-    # Decode pose reference image from base64
     if len(pose_image_b64) > 5 * 1024 * 1024:
+        _release_busy()
         return jsonify({"error": "Pose image too large"}), 400
     try:
         if "," in pose_image_b64:
@@ -732,83 +874,59 @@ def generate_posed():
         pose_bytes = base64.b64decode(pose_image_b64)
         pose_img = Image.open(io.BytesIO(pose_bytes)).convert("RGB")
     except Exception:
+        _release_busy()
         return jsonify({"error": "Invalid pose image"}), 400
 
     try:
-        steps = min(max(int(data.get("steps", 28)), 1), 50)
+        steps = min(max(int(data.get("steps", 50)), 1), 100)
     except (ValueError, TypeError):
+        _release_busy()
         return jsonify({"error": "Invalid steps value"}), 400
-
-    # Build a composite image: character (left) + pose skeleton (right)
-    # This gives Flux 2 both references in a single image
-    char_img = Image.open(str(char_path)).convert("RGB")
-    cw, ch = char_img.size
-    pose_img = pose_img.resize((cw, ch), Image.LANCZOS)
-    composite = Image.new("RGB", (cw * 2, ch))
-    composite.paste(char_img, (0, 0))
-    composite.paste(pose_img, (cw, 0))
-
-    # Save composite temporarily
-    comp_filename = f"{uuid.uuid4().hex[:12]}.png"
-    comp_path = OUTPUT_DIR / comp_filename
-    composite.save(str(comp_path))
 
     if not prompt:
         prompt = (
-            "Recreate the person from the left half of this image in the exact pose "
-            "shown by the skeleton on the right half. Keep the identity, clothing, "
-            "style, and background of the person on the left. Output only the person "
-            "in the new pose, not the side-by-side layout."
+            "Make the person in image 1 do the exact same pose of the person in image 2. "
+            "Keep the style, identity, clothing, and background of image 1. "
+            "The new pose should be pixel accurate to the pose in image 2. "
+            "Match the position of arms, legs, head, and torso exactly."
         )
-
-    fal_err = _require_fal_key()
-    if fal_err:
-        comp_path.unlink(missing_ok=True)
-        return fal_err
-
-    if not _try_acquire_busy():
-        comp_path.unlink(missing_ok=True)
-        return jsonify({"error": "Generation already in progress"}), 429
-
-    _broadcast("model_status", {"action": "loading", "name": "Flux 2 Pose"}, priority=True)
 
     try:
-        fal_url = _upload_to_fal(str(comp_path))
-
-        args = {
-            "prompt": prompt,
-            "image_url": fal_url,
-            "num_inference_steps": steps,
-            "guidance_scale": 3.5,
-            "output_format": "png",
-        }
-
-        result = fal_client.subscribe(
-            FAL_EDIT,
-            arguments=args,
-            with_logs=True,
-            on_queue_update=_fal_progress_callback(),
-        )
-
-        images = result.get("images") or result.get("output", {}).get("images")
-        if not images:
-            _broadcast("error", {"message": "No images returned"}, priority=True)
-            return jsonify({"error": "No images returned"}), 500
-
-        local_url, local_path = _download_fal_image(images[0]["url"])
-
         with _lock:
-            _current_image_path = str(local_path)
+            _unload_sam3d()
+            _load_flux()
 
-        _broadcast("model_status", {"action": "ready", "name": "Flux 2 Pose"}, priority=True)
-        return jsonify({"image_url": local_url})
-    except Exception as exc:
-        logger.exception("[Hydra] Posed generation failed")
-        _broadcast("error", {"message": "Posed generation failed"}, priority=True)
-        return jsonify({"error": f"Posed generation failed: {exc}"}), 500
+            char_img = Image.open(str(char_path)).convert("RGB")
+
+            try:
+                with torch.inference_mode():
+                    result = _flux_pipe(
+                        image=[char_img, pose_img],
+                        prompt=prompt,
+                        num_inference_steps=steps,
+                        guidance_scale=2.5,
+                        generator=torch.Generator(DEVICE).manual_seed(
+                            int(time.time()) % (2**32)
+                        ),
+                    ).images[0]
+            except Exception:
+                logger.exception("[Hydra] Posed generation failed")
+                _broadcast("error", {"message": "Posed generation failed"}, priority=True)
+                return jsonify({"error": "Posed generation failed"}), 500
+            finally:
+                del char_img, pose_img
+                torch.cuda.empty_cache()
+                gc.collect()
+
+            filename = f"{uuid.uuid4().hex[:12]}.png"
+            out = OUTPUT_DIR / filename
+            result.save(str(out))
+            _current_image_path = str(out)
+
+        _broadcast("model_status", {"action": "ready", "name": "Flux 2 NVFP4"}, priority=True)
+        return jsonify({"image_url": f"/outputs/{filename}"})
     finally:
         _release_busy()
-        comp_path.unlink(missing_ok=True)
 
 
 @app.route("/api/status")
@@ -817,10 +935,7 @@ def status():
     if _current_image_path and os.path.isfile(_current_image_path):
         image_url = f"/outputs/{Path(_current_image_path).name}"
     return jsonify({
-        "lora": {
-            "name": _current_lora["name"],
-            "trigger": _current_lora["trigger"],
-        } if _current_lora else None,
+        "lora": _current_lora,
         "has_image": image_url is not None,
         "image_url": image_url,
         "busy": _busy,
@@ -870,10 +985,5 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
-
-    if not os.environ.get("FAL_KEY"):
-        logger.warning("[Hydra] FAL_KEY not set -- generation/editing will fail.")
-        logger.warning("[Hydra] Set your fal.ai API key: export FAL_KEY=your_key_here")
-
-    logger.info("[Hydra] Character Developer (Flux 2) -- http://0.0.0.0:7862")
+    logger.info("[Hydra] Character Developer (Flux 2 NVFP4) -- http://0.0.0.0:7862")
     app.run(host="0.0.0.0", port=7862, debug=False, threaded=True)

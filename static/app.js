@@ -430,6 +430,16 @@
   // Per-node overlays
   // ---------------------------------------------------------------
 
+  function showNodeStepCounter(node, step, total) {
+    var counter = node.el.querySelector(".node-step-counter");
+    if (!counter) {
+      counter = document.createElement("div");
+      counter.className = "node-step-counter";
+      node.el.appendChild(counter);
+    }
+    counter.textContent = step + " / " + total;
+  }
+
   function showNodeLoading(node, text) {
     var overlay = node.el.querySelector(".node-loading-overlay");
     if (!overlay) {
@@ -800,15 +810,15 @@
   });
 
   function syncDefaultSteps() {
-    stepsRange.value = 28;
-    stepsValue.textContent = "28";
-    cfgRange.value = 3.5;
-    cfgValue.textContent = "3.5";
+    stepsRange.value = 50;
+    stepsValue.textContent = "50";
+    cfgRange.value = 4.0;
+    cfgValue.textContent = "4";
   }
 
-  function syncStepsForMode() {
-    stepsRange.value = 28;
-    stepsValue.textContent = "28";
+  function syncStepsForMode(m) {
+    stepsRange.value = m === "edit" ? 50 : 50;
+    stepsValue.textContent = stepsRange.value;
   }
 
   // ---------------------------------------------------------------
@@ -1010,6 +1020,38 @@
   var evtSource = new EventSource("/api/stream");
 
   function attachSSEListeners(src) {
+    src.addEventListener("preview", function (e) {
+      var data = JSON.parse(e.data);
+
+      if (!busy) {
+        busy = true;
+        promptInput.disabled = true;
+        modeToggle.classList.add("loading");
+        if (!generatingId) {
+          var gNode = createNode({ state: "generating" });
+          generatingId = gNode.id;
+          selectNode(gNode.id);
+        }
+      }
+
+      var node = generatingId && nodes.get(generatingId);
+      if (!node || !node.el) return;
+
+      var img = node.el.querySelector("img");
+      if (!img) {
+        var ph = node.el.querySelector(".node-placeholder");
+        if (ph) ph.remove();
+        img = document.createElement("img");
+        img.alt = "Preview";
+        img.draggable = false;
+        node.el.appendChild(img);
+      }
+      img.src = data.image;
+      img.classList.add("preview-img");
+
+      showNodeStepCounter(node, data.step, data.total);
+    });
+
     src.addEventListener("model_status", function (e) {
       var data = JSON.parse(e.data);
       var node = generatingId && nodes.get(generatingId);

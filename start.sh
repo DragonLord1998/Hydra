@@ -3,8 +3,22 @@ set -e
 
 echo "[Hydra] Installing dependencies..."
 
-# Core deps — Flask server + fal.ai client for Flux 2 API
-pip install --quiet flask Pillow fal-client --ignore-installed blinker
+# Fix torch/torchvision compatibility (RunPod pods sometimes have mismatched versions)
+CUDA_TAG=$(python3 -c "import torch; print('cu' + torch.version.cuda.replace('.','')[:3])" 2>/dev/null || echo "cu124")
+echo "[Hydra] Detected CUDA: $CUDA_TAG — reinstalling torchvision..."
+pip uninstall -y torchvision 2>/dev/null || true
+pip install --quiet torchvision --no-deps --index-url "https://download.pytorch.org/whl/${CUDA_TAG}"
+
+# Install diffusers from GitHub main (needed for Flux2Pipeline)
+pip install --quiet git+https://github.com/huggingface/diffusers.git
+
+# Install other deps
+pip install --quiet flask Pillow accelerate sentencepiece transformers numpy --ignore-installed blinker
+
+# TensorRT-LLM visual_gen — NVFP4 quantization (Blackwell GPUs only)
+echo "[Hydra] Installing TensorRT-LLM visual_gen for NVFP4..."
+pip install --quiet tensorrt-llm 2>/dev/null || \
+  echo "[Hydra] NOTE: TensorRT-LLM not available — Flux 2 will run in BF16 (still works, just no NVFP4 speedup)"
 
 # SAM 3D Body — pose extraction
 echo "[Hydra] Installing SAM 3D Body dependencies..."
@@ -47,10 +61,8 @@ import os
 token = os.environ.get('HF_TOKEN')
 hf_hub_download('ByteDance-Seed/SeedVR2-7B', 'seedvr2_ema_7b_sharp.pth',
                 local_dir='$SEEDVR2_DIR/ckpts', token=token)
-# VAE checkpoint (shared across 3B/7B)
 hf_hub_download('ByteDance-Seed/SeedVR2-3B', 'ema_vae.pth',
                 local_dir='$SEEDVR2_DIR/ckpts', token=token)
-# Pre-computed text embeddings (shared across 3B/7B)
 hf_hub_download('ByteDance-Seed/SeedVR2-3B', 'pos_emb.pt',
                 local_dir='$SEEDVR2_DIR', token=token)
 hf_hub_download('ByteDance-Seed/SeedVR2-3B', 'neg_emb.pt',
@@ -58,20 +70,8 @@ hf_hub_download('ByteDance-Seed/SeedVR2-3B', 'neg_emb.pt',
 print('[Hydra] SeedVR2 7B Sharp checkpoint ready.')
 " 2>/dev/null || echo "[Hydra] WARNING: SeedVR2 checkpoint download failed — will retry on first use"
 
-  # Symlink sharp → default name so the hardcoded checkpoint path works
   ln -sf seedvr2_ema_7b_sharp.pth "$SEEDVR2_DIR/ckpts/seedvr2_ema_7b.pth"
-
-  # Install Hydra's CLI wrapper
   cp "$(dirname "$0")/seedvr2_cli.py" "$SEEDVR2_DIR/inference_cli.py"
-fi
-
-# Check FAL_KEY
-if [ -z "$FAL_KEY" ]; then
-  echo ""
-  echo "[Hydra] WARNING: FAL_KEY not set — generation/editing will fail."
-  echo "[Hydra] Get your key at https://fal.ai/dashboard/keys"
-  echo "[Hydra] Then: export FAL_KEY=your_key_here"
-  echo ""
 fi
 
 echo "[Hydra] Starting server..."

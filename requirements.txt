@@ -1,6 +1,14 @@
 flask
-fal-client
+torch
 Pillow
-# Optional — only needed for SAM 3D Body pose extraction:
-# torch
-# sam-3d-body
+accelerate
+sentencepiece
+transformers
+numpy
+blinker
+# diffusers — install from git main for Flux2Pipeline:
+# pip install git+https://github.com/huggingface/diffusers.git
+#
+# TensorRT-LLM visual_gen — for NVFP4 quantization on Blackwell GPUs:
+# pip install tensorrt-llm (feat/visual_gen branch)
+# See: https://github.com/NVIDIA/TensorRT-LLM/tree/feat/visual_gen
