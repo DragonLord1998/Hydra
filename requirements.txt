@@ -8,5 +8,6 @@ transformers
 numpy
 blinker
 huggingface_hub
-# diffusers — install from git main for Flux2Pipeline + from_single_file:
+bitsandbytes
+# diffusers — install from git main for Flux2Pipeline:
 # pip install git+https://github.com/huggingface/diffusers.git

@@ -1,7 +1,7 @@
 """
 Hydra -- Character Developer
 
-Flux 2 NVFP4 local inference (pre-quantized checkpoint via diffusers).
+Flux 2 local inference (pre-quantized checkpoint via diffusers).
 Single model for generation + editing.
 TAESD-accelerated live latent previews.
 SAM 3D Body for local pose extraction.
@@ -47,6 +47,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 # Model paths
 FLUX2_MODEL = os.environ.get("FLUX2_MODEL", "black-forest-labs/FLUX.2-dev")
 FLUX2_NVFP4_REPO = os.environ.get("FLUX2_NVFP4_REPO", "black-forest-labs/FLUX.2-dev-NVFP4")
+FLUX2_BNB4_REPO = os.environ.get("FLUX2_BNB4_REPO", "diffusers/FLUX.2-dev-bnb-4bit")
 TAESD_MODEL = os.environ.get("TAESD_MODEL", "madebyollin/taef1")
 SEEDVR2_CLI = os.environ.get("SEEDVR2_CLI", "/workspace/seedvr2/inference_cli.py")
 HF_TOKEN = os.environ.get("HF_TOKEN")
@@ -335,7 +336,7 @@ def _unload_sam3d():
 
 
 # ---------------------------------------------------------------------------
-# Flux 2 NVFP4 model lifecycle
+# Flux 2 model lifecycle
 # ---------------------------------------------------------------------------
 
 def _unload_flux():
@@ -345,11 +346,11 @@ def _unload_flux():
         _flux_pipe = None
         torch.cuda.empty_cache()
         gc.collect()
-        logger.info("[Hydra] Flux 2 NVFP4 pipeline unloaded.")
+        logger.info("[Hydra] Flux 2 pipeline unloaded.")
 
 
 def _load_flux():
-    """Load Flux 2 NVFP4 from the official pre-quantized checkpoint."""
+    """Load Flux 2 from the pre-quantized BnB 4-bit checkpoint."""
     global _flux_pipe
     if _flux_pipe is not None:
         return
@@ -357,26 +358,36 @@ def _load_flux():
     _unload_sam3d()
 
     from diffusers import Flux2Pipeline
+    from transformers import Mistral3ForConditionalGeneration
 
-    logger.info("[Hydra] Loading Flux 2 NVFP4 from %s ...", FLUX2_NVFP4_REPO)
-    _broadcast("model_status", {"action": "loading", "name": "Flux 2 NVFP4"}, priority=True)
+    logger.info("[Hydra] Loading Flux 2 (4-bit) from %s ...", FLUX2_BNB4_REPO)
+    _broadcast("model_status", {"action": "loading", "name": "Flux 2 (4-bit)"}, priority=True)
 
-    # Load the pre-quantized NVFP4 checkpoint directly via from_single_file.
-    # The mixed variant keeps sensitive layers (embedders, norms) in BF16
-    # for near-FP8 precision while the bulk runs in NVFP4.
-    from huggingface_hub import hf_hub_download
-    nvfp4_path = hf_hub_download(
-        FLUX2_NVFP4_REPO,
-        "flux2-dev-nvfp4-mixed.safetensors",
-        token=HF_TOKEN,
+    # The BnB 4-bit text encoder (~14 GB) + transformer (~17 GB) together
+    # exceed 32 GB VRAM.  Work around this by loading sequentially:
+    #   1. Load text encoder to CUDA, then move to CPU (frees VRAM)
+    #   2. Load pipeline (transformer) without text encoder
+    #   3. Re-attach text encoder and enable cpu_offload
+    # cpu_offload moves each component to GPU only during its forward pass.
+    logger.info("[Hydra] Loading text encoder...")
+    _broadcast("model_status", {"action": "loading", "name": "Text encoder"}, priority=True)
+    text_encoder = Mistral3ForConditionalGeneration.from_pretrained(
+        FLUX2_BNB4_REPO, subfolder="text_encoder",
+        torch_dtype=torch.bfloat16, token=HF_TOKEN,
     )
+    text_encoder.to("cpu")
+    torch.cuda.empty_cache()
+    gc.collect()
 
-    _flux_pipe = Flux2Pipeline.from_single_file(
-        nvfp4_path,
-        config=FLUX2_MODEL,  # pipeline configs (VAE, scheduler, tokenizer) from base repo
+    logger.info("[Hydra] Loading transformer pipeline...")
+    _broadcast("model_status", {"action": "loading", "name": "Transformer"}, priority=True)
+    _flux_pipe = Flux2Pipeline.from_pretrained(
+        FLUX2_BNB4_REPO,
+        text_encoder=None,
         torch_dtype=torch.bfloat16,
         token=HF_TOKEN,
     )
+    _flux_pipe.text_encoder = text_encoder
     _flux_pipe.enable_model_cpu_offload()
 
     # BF16 VAE: skip costly fp32 upcast (bf16 has same exponent range as fp32)
@@ -388,24 +399,8 @@ def _load_flux():
         logger.info("[Hydra] Loading LoRA: %s", _current_lora["name"])
         _flux_pipe.load_lora_weights(_current_lora["path"])
 
-    # Warmup pass -- triggers CUDA kernel compilation and offload hooks
-    logger.info("[Hydra] Warmup pass...")
-    _broadcast("model_status", {"action": "loading", "name": "Warming up Flux 2..."}, priority=True)
-    try:
-        with torch.inference_mode():
-            _flux_pipe(
-                prompt="warmup",
-                height=256, width=256,
-                num_inference_steps=1,
-                guidance_scale=0.0,
-            )
-    except Exception:
-        logger.debug("[Hydra] Warmup failed (non-fatal)", exc_info=True)
-    torch.cuda.empty_cache()
-    gc.collect()
-
-    logger.info("[Hydra] Flux 2 NVFP4 pipeline ready.")
-    _broadcast("model_status", {"action": "ready", "name": "Flux 2 NVFP4"}, priority=True)
+    logger.info("[Hydra] Flux 2 pipeline ready.")
+    _broadcast("model_status", {"action": "ready", "name": "Flux 2"}, priority=True)
 
 
 # ---------------------------------------------------------------------------
@@ -576,7 +571,7 @@ def generate():
             result.save(str(out))
             _current_image_path = str(out)
 
-        _broadcast("model_status", {"action": "ready", "name": "Flux 2 NVFP4"}, priority=True)
+        _broadcast("model_status", {"action": "ready", "name": "Flux 2"}, priority=True)
         return jsonify({"image_url": f"/outputs/{filename}", "seed": seed})
     finally:
         _release_busy()
@@ -660,7 +655,7 @@ def edit_image():
             result.save(str(out))
             _current_image_path = str(out)
 
-        _broadcast("model_status", {"action": "ready", "name": "Flux 2 NVFP4"}, priority=True)
+        _broadcast("model_status", {"action": "ready", "name": "Flux 2"}, priority=True)
         return jsonify({"image_url": f"/outputs/{filename}"})
     finally:
         _release_busy()
@@ -897,7 +892,7 @@ def generate_posed():
             result.save(str(out))
             _current_image_path = str(out)
 
-        _broadcast("model_status", {"action": "ready", "name": "Flux 2 NVFP4"}, priority=True)
+        _broadcast("model_status", {"action": "ready", "name": "Flux 2"}, priority=True)
         return jsonify({"image_url": f"/outputs/{filename}"})
     finally:
         _release_busy()
@@ -959,10 +954,10 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
-    logger.info("[Hydra] Character Developer (Flux 2 NVFP4) -- http://0.0.0.0:7862")
+    logger.info("[Hydra] Character Developer (Flux 2) -- http://0.0.0.0:7862")
 
     # Pre-load Flux 2 at startup so the first request is instant
-    logger.info("[Hydra] Pre-loading Flux 2 NVFP4...")
+    logger.info("[Hydra] Pre-loading Flux 2...")
     _load_flux()
     _load_taesd()
 

@@ -33,30 +33,28 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Diffusers (from git main for Flux2Pipeline + from_single_file NVFP4 support)
+# Diffusers (from git main for Flux2Pipeline support)
 # ---------------------------------------------------------------------------
 pip install --quiet git+https://github.com/huggingface/diffusers.git
 
 # ---------------------------------------------------------------------------
 # Other Python deps
 # ---------------------------------------------------------------------------
-pip install --quiet flask Pillow accelerate sentencepiece transformers numpy --ignore-installed blinker
+pip install --quiet flask Pillow accelerate sentencepiece transformers numpy bitsandbytes --ignore-installed blinker
 
 # ---------------------------------------------------------------------------
 # Pre-download Flux 2 model (so the server starts ready to generate)
 # ---------------------------------------------------------------------------
-echo "[Hydra] Downloading Flux 2 NVFP4 checkpoint (22GB pre-quantized)..."
+echo "[Hydra] Downloading Flux 2 BnB 4-bit checkpoint..."
 python3 -c "
-from huggingface_hub import hf_hub_download
+from huggingface_hub import snapshot_download
 import os
 token = os.environ.get('HF_TOKEN')
 
-# Download the pre-quantized NVFP4 transformer (22GB — mixed precision for best quality)
-hf_hub_download('black-forest-labs/FLUX.2-dev-NVFP4',
-                'flux2-dev-nvfp4-mixed.safetensors', token=token)
+snapshot_download('diffusers/FLUX.2-dev-bnb-4bit', token=token)
 
-print('[Hydra] Flux 2 NVFP4 checkpoint downloaded.')
-" || echo "[Hydra] WARNING: Flux 2 NVFP4 download failed — will retry on first request"
+print('[Hydra] Flux 2 BnB 4-bit checkpoint downloaded.')
+" || echo "[Hydra] WARNING: Flux 2 download failed — will retry on first request"
 
 echo "[Hydra] Downloading TAESD (madebyollin/taef1)..."
 python3 -c "
