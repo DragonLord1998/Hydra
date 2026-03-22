@@ -3,24 +3,65 @@ set -e
 
 echo "[Hydra] Installing dependencies..."
 
-# Fix torch/torchvision compatibility (RunPod pods sometimes have mismatched versions)
-CUDA_TAG=$(python3 -c "import torch; print('cu' + torch.version.cuda.replace('.','')[:3])" 2>/dev/null || echo "cu124")
-echo "[Hydra] Detected CUDA: $CUDA_TAG — reinstalling torchvision..."
-pip uninstall -y torchvision 2>/dev/null || true
-pip install --quiet torchvision --no-deps --index-url "https://download.pytorch.org/whl/${CUDA_TAG}"
+# ---------------------------------------------------------------------------
+# System prerequisites
+# ---------------------------------------------------------------------------
+sudo apt-get -y install libopenmpi-dev 2>/dev/null || true
 
-# Install diffusers from GitHub main (needed for Flux2Pipeline)
+# ---------------------------------------------------------------------------
+# PyTorch (CUDA 13.0 for Blackwell / TensorRT-LLM compatibility)
+# ---------------------------------------------------------------------------
+CUDA_TAG=$(python3 -c "import torch; print('cu' + torch.version.cuda.replace('.','')[:3])" 2>/dev/null || echo "cu130")
+echo "[Hydra] Detected CUDA: $CUDA_TAG"
+
+# TensorRT-LLM requires torch 2.9.1 + cu130 — install if not already present
+TORCH_VER=$(python3 -c "import torch; print(torch.__version__)" 2>/dev/null || echo "none")
+echo "[Hydra] Current torch: $TORCH_VER"
+if [[ "$TORCH_VER" != 2.9.* ]]; then
+  echo "[Hydra] Installing PyTorch 2.9.1 (cu130) for TensorRT-LLM..."
+  pip install --quiet torch==2.9.1 torchvision --index-url https://download.pytorch.org/whl/cu130
+fi
+
+# ---------------------------------------------------------------------------
+# TensorRT-LLM (NVFP4 quantization for Blackwell GPUs)
+# ---------------------------------------------------------------------------
+echo "[Hydra] Installing TensorRT-LLM for NVFP4..."
+pip install --quiet --ignore-installed pip setuptools wheel
+pip install --quiet tensorrt_llm 2>/dev/null || \
+  echo "[Hydra] WARNING: TensorRT-LLM install failed — Flux 2 will run in BF16 fallback"
+
+# ---------------------------------------------------------------------------
+# Diffusers (from git main for Flux2Pipeline)
+# ---------------------------------------------------------------------------
 pip install --quiet git+https://github.com/huggingface/diffusers.git
 
-# Install other deps
+# ---------------------------------------------------------------------------
+# Other Python deps
+# ---------------------------------------------------------------------------
 pip install --quiet flask Pillow accelerate sentencepiece transformers numpy --ignore-installed blinker
 
-# TensorRT-LLM visual_gen — NVFP4 quantization (Blackwell GPUs only)
-echo "[Hydra] Installing TensorRT-LLM visual_gen for NVFP4..."
-pip install --quiet tensorrt-llm 2>/dev/null || \
-  echo "[Hydra] NOTE: TensorRT-LLM not available — Flux 2 will run in BF16 (still works, just no NVFP4 speedup)"
+# ---------------------------------------------------------------------------
+# Pre-download Flux 2 model (so the server starts ready to generate)
+# ---------------------------------------------------------------------------
+echo "[Hydra] Downloading Flux 2 model (black-forest-labs/FLUX.2-dev)..."
+python3 -c "
+from huggingface_hub import snapshot_download
+import os
+token = os.environ.get('HF_TOKEN')
+snapshot_download('black-forest-labs/FLUX.2-dev', token=token)
+print('[Hydra] Flux 2 model downloaded.')
+" || echo "[Hydra] WARNING: Flux 2 download failed — will retry on first request"
 
+echo "[Hydra] Downloading TAESD (madebyollin/taef1)..."
+python3 -c "
+from huggingface_hub import snapshot_download
+snapshot_download('madebyollin/taef1')
+print('[Hydra] TAESD downloaded.')
+" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
 # SAM 3D Body — pose extraction
+# ---------------------------------------------------------------------------
 echo "[Hydra] Installing SAM 3D Body dependencies..."
 pip install --quiet pytorch-lightning pyrender opencv-python yacs scikit-image einops timm \
   dill pandas rich hydra-core hydra-submitit-launcher hydra-colorlog pyrootutils networkx==3.2.1 \
@@ -42,7 +83,9 @@ print('[Hydra] SAM 3D Body checkpoint ready.')
 " 2>/dev/null || echo "[Hydra] WARNING: SAM 3D checkpoint download failed — will retry on first use"
 fi
 
+# ---------------------------------------------------------------------------
 # SeedVR2 7B Sharp — image upscaling
+# ---------------------------------------------------------------------------
 SEEDVR2_DIR="/workspace/seedvr2"
 if [ ! -d "$SEEDVR2_DIR/.git" ]; then
   echo "[Hydra] Cloning SeedVR2..."
@@ -74,6 +117,10 @@ print('[Hydra] SeedVR2 7B Sharp checkpoint ready.')
   cp "$(dirname "$0")/seedvr2_cli.py" "$SEEDVR2_DIR/inference_cli.py"
 fi
 
-echo "[Hydra] Starting server..."
+# ---------------------------------------------------------------------------
+# Launch
+# ---------------------------------------------------------------------------
+echo ""
+echo "[Hydra] All models pre-downloaded. Starting server..."
 cd "$(dirname "$0")"
 python3 server.py

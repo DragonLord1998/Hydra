@@ -986,4 +986,10 @@ if __name__ == "__main__":
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
     logger.info("[Hydra] Character Developer (Flux 2 NVFP4) -- http://0.0.0.0:7862")
+
+    # Pre-load Flux 2 at startup so the first request is instant
+    logger.info("[Hydra] Pre-loading Flux 2 NVFP4...")
+    _load_flux()
+    _load_taesd()
+
     app.run(host="0.0.0.0", port=7862, debug=False, threaded=True)
