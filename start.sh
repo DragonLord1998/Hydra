@@ -33,7 +33,7 @@ pip install --quiet flask Pillow accelerate sentencepiece transformers numpy --i
 # ---------------------------------------------------------------------------
 echo "[Hydra] Downloading Flux 2 NVFP4 checkpoint (22GB pre-quantized)..."
 python3 -c "
-from huggingface_hub import snapshot_download, hf_hub_download
+from huggingface_hub import hf_hub_download
 import os
 token = os.environ.get('HF_TOKEN')
 
@@ -41,12 +41,8 @@ token = os.environ.get('HF_TOKEN')
 hf_hub_download('black-forest-labs/FLUX.2-dev-NVFP4',
                 'flux2-dev-nvfp4-mixed.safetensors', token=token)
 
-# Download pipeline components (VAE, text encoder, scheduler, tokenizer) from the base repo
-snapshot_download('black-forest-labs/FLUX.2-dev', token=token,
-                  ignore_patterns=['flux2-dev.safetensors', '*.png'])
-
-print('[Hydra] Flux 2 NVFP4 model downloaded.')
-" || echo "[Hydra] WARNING: Flux 2 download failed — will retry on first request"
+print('[Hydra] Flux 2 NVFP4 checkpoint downloaded.')
+" || echo "[Hydra] WARNING: Flux 2 NVFP4 download failed — will retry on first request"
 
 echo "[Hydra] Downloading TAESD (madebyollin/taef1)..."
 python3 -c "
