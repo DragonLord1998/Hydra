@@ -267,6 +267,43 @@ def _raw_latents_preview(latents: torch.Tensor, height: int, width: int,
         return None
 
 
+def _decode_latents_taef2(latents: torch.Tensor, height: int, width: int) -> Image.Image:
+    """Decode Flux 2 packed latents to a PIL Image using TAEF2 on CPU.
+
+    Used for final image decode to avoid the slow full-VAE decode that
+    requires GPU model shuffling under model_cpu_offload.
+    """
+    _load_taef2()
+    if _taef2_decoder is None:
+        raise RuntimeError("TAEF2 decoder not available")
+
+    with torch.inference_mode():
+        lat = latents[:1].detach().cpu().float()
+
+        if lat.ndim == 3:
+            # Unpack: (B, seq_len, 128) -> spatial (B, 128, h/2, w/2)
+            b, seq_len, c = lat.shape
+            vae_sf = getattr(_flux_pipe, 'vae_scale_factor', 8) if _flux_pipe else 8
+            h = 2 * (height // (vae_sf * 2))
+            w = 2 * (width // (vae_sf * 2))
+            spatial = lat.permute(0, 2, 1).reshape(b, c, h // 2, w // 2)
+        else:
+            spatial = lat
+
+        # Unpatchify: (B, 128, h/2, w/2) -> (B, 32, h, w)
+        b, c, ph, pw = spatial.shape
+        if c >= 8:
+            spatial = spatial.reshape(b, c // 4, 2, 2, ph, pw)
+            spatial = spatial.permute(0, 1, 4, 2, 5, 3)
+            spatial = spatial.reshape(b, c // 4, ph * 2, pw * 2)
+
+        # TAEF2 decode on CPU -> [0, 1]
+        decoded = _taef2_decoder(spatial.to(dtype=torch.bfloat16))
+        rgb = (decoded[0].clamp(0, 1).float().permute(1, 2, 0).numpy() * 255)
+        rgb = rgb.clip(0, 255).astype(np.uint8)
+        return Image.fromarray(rgb)
+
+
 # ---------------------------------------------------------------------------
 # MHR70 skeleton -- SAM 3D Body joint definitions
 # ---------------------------------------------------------------------------
@@ -564,6 +601,8 @@ def generate():
     if lora_strength < 0:
         lora_strength = _current_lora["strength"] if _current_lora else 1.0
 
+    # Phase 1: GPU denoising (locked + busy)
+    latent_output = None
     try:
         with _lock:
             _load_flux()
@@ -583,10 +622,6 @@ def generate():
                                 "total": total_steps,
                                 "image": b64,
                             })
-                if step_index + 1 >= total_steps:
-                    _broadcast("model_status", {
-                        "action": "loading", "name": "Decoding final image...",
-                    }, priority=True)
                 return cb_kwargs
 
             try:
@@ -600,10 +635,11 @@ def generate():
                         generator=generator,
                         callback_on_step_end=_on_step,
                         callback_on_step_end_tensor_inputs=["latents"],
+                        output_type="latent",
                     )
                     if _current_lora:
                         pipe_kwargs["attention_kwargs"] = {"scale": lora_strength}
-                    result = _flux_pipe(**pipe_kwargs).images[0]
+                    latent_output = _flux_pipe(**pipe_kwargs).images
             except Exception:
                 logger.exception("[Hydra] Generation failed")
                 _broadcast("error", {"message": "Generation failed"}, priority=True)
@@ -611,16 +647,23 @@ def generate():
             finally:
                 torch.cuda.empty_cache()
                 gc.collect()
-
-            filename = f"{uuid.uuid4().hex[:12]}.png"
-            out = OUTPUT_DIR / filename
-            result.save(str(out))
-            _current_image_path = str(out)
-
-        _broadcast("model_status", {"action": "ready", "name": "Flux 2"}, priority=True)
-        return jsonify({"image_url": f"/outputs/{filename}", "seed": seed})
     finally:
         _release_busy()
+
+    # Phase 2: TAEF2 decode on CPU (busy released — new generations can start)
+    try:
+        result = _decode_latents_taef2(latent_output, height, width)
+    except Exception:
+        logger.exception("[Hydra] TAEF2 decode failed")
+        return jsonify({"error": "Image decode failed"}), 500
+
+    filename = f"{uuid.uuid4().hex[:12]}.png"
+    out = OUTPUT_DIR / filename
+    result.save(str(out))
+    with _lock:
+        _current_image_path = str(out)
+    _broadcast("model_status", {"action": "ready", "name": "Flux 2"}, priority=True)
+    return jsonify({"image_url": f"/outputs/{filename}", "seed": seed})
 
 
 @app.route("/api/edit", methods=["POST"])
@@ -659,20 +702,23 @@ def edit_image():
     if lora_strength < 0:
         lora_strength = _current_lora["strength"] if _current_lora else 1.0
 
+    # Phase 1: GPU denoising (locked + busy)
+    latent_output = None
+    edit_width, edit_height = 0, 0
     try:
         with _lock:
             _load_flux()
 
             source = Image.open(_current_image_path).convert("RGB")
-            width, height = source.size
+            edit_width, edit_height = source.size
 
             def _on_edit_step(pipe, step_index, timestep, cb_kwargs):
                 if (step_index + 1) % 2 == 0:
                     latents = cb_kwargs.get("latents")
                     if latents is not None:
-                        b64 = _vae_preview(latents, height, width)
+                        b64 = _vae_preview(latents, edit_height, edit_width)
                         if not b64:
-                            b64 = _raw_latents_preview(latents, height, width)
+                            b64 = _raw_latents_preview(latents, edit_height, edit_width)
                         if b64:
                             _broadcast("preview", {
                                 "step": step_index + 1,
@@ -693,10 +739,11 @@ def edit_image():
                         ),
                         callback_on_step_end=_on_edit_step,
                         callback_on_step_end_tensor_inputs=["latents"],
+                        output_type="latent",
                     )
                     if _current_lora:
                         pipe_kwargs["attention_kwargs"] = {"scale": lora_strength}
-                    result = _flux_pipe(**pipe_kwargs).images[0]
+                    latent_output = _flux_pipe(**pipe_kwargs).images
             except Exception:
                 logger.exception("[Hydra] Edit failed")
                 _broadcast("error", {"message": "Edit failed"}, priority=True)
@@ -705,16 +752,23 @@ def edit_image():
                 del source
                 torch.cuda.empty_cache()
                 gc.collect()
-
-            filename = f"{uuid.uuid4().hex[:12]}.png"
-            out = OUTPUT_DIR / filename
-            result.save(str(out))
-            _current_image_path = str(out)
-
-        _broadcast("model_status", {"action": "ready", "name": "Flux 2"}, priority=True)
-        return jsonify({"image_url": f"/outputs/{filename}"})
     finally:
         _release_busy()
+
+    # Phase 2: TAEF2 decode on CPU (busy released — new generations can start)
+    try:
+        result = _decode_latents_taef2(latent_output, edit_height, edit_width)
+    except Exception:
+        logger.exception("[Hydra] TAEF2 decode failed")
+        return jsonify({"error": "Image decode failed"}), 500
+
+    filename = f"{uuid.uuid4().hex[:12]}.png"
+    out = OUTPUT_DIR / filename
+    result.save(str(out))
+    with _lock:
+        _current_image_path = str(out)
+    _broadcast("model_status", {"action": "ready", "name": "Flux 2"}, priority=True)
+    return jsonify({"image_url": f"/outputs/{filename}"})
 
 
 @app.route("/api/upscale", methods=["POST"])
