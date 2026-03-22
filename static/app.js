@@ -23,6 +23,9 @@
   var cfgRange       = document.getElementById("cfgRange");
   var cfgValue       = document.getElementById("cfgValue");
   var cfgRow         = document.getElementById("cfgRow");
+  var loraStrengthRow   = document.getElementById("loraStrengthRow");
+  var loraStrengthRange = document.getElementById("loraStrengthRange");
+  var loraStrengthValue = document.getElementById("loraStrengthValue");
   var uploadImgBtn   = document.getElementById("uploadImgBtn");
   var imageFile      = document.getElementById("imageFile");
   var uploadProgress     = document.getElementById("uploadProgress");
@@ -812,6 +815,17 @@
     cfgValue.textContent = cfgRange.value;
   });
 
+  loraStrengthRange.addEventListener("input", function () {
+    loraStrengthValue.textContent = parseFloat(loraStrengthRange.value).toFixed(2);
+  });
+  loraStrengthRange.addEventListener("change", function () {
+    fetch("/api/lora-strength", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ strength: parseFloat(loraStrengthRange.value) }),
+    });
+  });
+
   function syncDefaultSteps() {
     stepsRange.value = 50;
     stepsValue.textContent = "50";
@@ -879,6 +893,7 @@
     var fd = new FormData();
     fd.append("lora", file);
     fd.append("trigger_word", trigger);
+    fd.append("lora_strength", loraStrengthRange.value);
 
     showUploadProgress(0);
 
@@ -899,6 +914,11 @@
           loraBtn.classList.add("loaded");
           loraStatus.textContent = data.name;
           loraStatus.classList.add("visible");
+          loraStrengthRow.style.display = "";
+          if (data.strength != null) {
+            loraStrengthRange.value = data.strength;
+            loraStrengthValue.textContent = parseFloat(data.strength).toFixed(2);
+          }
         } else {
           showToast(data.error || "Upload failed");
         }
@@ -997,10 +1017,11 @@
     selectNode(newNode.id);
 
     var cfg = parseFloat(cfgRange.value);
+    var loraStr = parseFloat(loraStrengthRange.value);
     var endpoint = mode === "generate" ? "/api/generate" : "/api/edit";
     var payload = mode === "generate"
-      ? { prompt: prompt, width: w, height: h, steps: steps, cfg: cfg }
-      : { prompt: prompt, steps: steps, source_image: selectedUrl };
+      ? { prompt: prompt, width: w, height: h, steps: steps, cfg: cfg, lora_strength: loraStr }
+      : { prompt: prompt, steps: steps, source_image: selectedUrl, lora_strength: loraStr };
 
     try {
       var resp = await fetch(endpoint, {
@@ -1109,6 +1130,11 @@
           loraBtn.classList.add("loaded");
           loraStatus.textContent = data.lora.name;
           loraStatus.classList.add("visible");
+          loraStrengthRow.style.display = "";
+          if (data.lora.strength != null) {
+            loraStrengthRange.value = data.lora.strength;
+            loraStrengthValue.textContent = parseFloat(data.lora.strength).toFixed(2);
+          }
         }
         // If server finished while we were disconnected
         if (!data.busy && busy) {
@@ -1147,7 +1173,12 @@
       loraBtn.classList.add("loaded");
       loraStatus.textContent = data.lora.name;
       loraStatus.classList.add("visible");
+      loraStrengthRow.style.display = "";
       if (data.lora.trigger) triggerWord.value = data.lora.trigger;
+      if (data.lora.strength != null) {
+        loraStrengthRange.value = data.lora.strength;
+        loraStrengthValue.textContent = parseFloat(data.lora.strength).toFixed(2);
+      }
     }
     // If no nodes from localStorage, restore last server image
     if (data.image_url && nodes.size === 0) {

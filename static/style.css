@@ -369,6 +369,7 @@ html, body {
 .settings-range::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: var(--text); cursor: pointer; border: none; }
 .steps-value { font-size: 0.72rem; font-family: var(--font-mono); color: var(--text); min-width: 24px; text-align: right; }
 
+.lora-strength-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0; }
 .lora-status { font-size: 0.65rem; font-family: var(--font-mono); color: var(--text-muted); display: none; text-align: right; }
 .lora-status.visible { display: block; }
 

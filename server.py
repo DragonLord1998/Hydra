@@ -451,6 +451,10 @@ def upload_lora():
 
     file = request.files.get("lora")
     trigger = (request.form.get("trigger_word") or "chrx").strip()
+    try:
+        strength = min(max(float(request.form.get("lora_strength", 1.0)), 0), 2)
+    except (ValueError, TypeError):
+        strength = 1.0
 
     if not file or not file.filename.endswith(".safetensors"):
         return jsonify({"error": "Upload a .safetensors file"}), 400
@@ -468,7 +472,7 @@ def upload_lora():
     file.save(str(save_path))
 
     with _lock:
-        _current_lora = {"path": str(save_path), "name": filename, "trigger": trigger}
+        _current_lora = {"path": str(save_path), "name": filename, "trigger": trigger, "strength": strength}
         if _flux_pipe is not None:
             try:
                 _flux_pipe.unload_lora_weights()
@@ -477,7 +481,21 @@ def upload_lora():
             _flux_pipe.load_lora_weights(str(save_path))
             logger.info("[Hydra] LoRA hot-swapped: %s", filename)
 
-    return jsonify({"name": filename, "trigger": trigger})
+    return jsonify({"name": filename, "trigger": trigger, "strength": strength})
+
+
+@app.route("/api/lora-strength", methods=["POST"])
+@require_auth
+def set_lora_strength():
+    if not _current_lora:
+        return jsonify({"error": "No LoRA loaded"}), 400
+    data = request.get_json(silent=True) or {}
+    try:
+        strength = min(max(float(data.get("strength", 1.0)), 0), 2)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid strength value"}), 400
+    _current_lora["strength"] = strength
+    return jsonify({"strength": strength})
 
 
 ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
@@ -535,11 +553,16 @@ def generate():
         height = int(data.get("height", 1024))
         total_steps = min(max(int(data.get("steps", 50)), 1), 100)
         guidance = min(max(float(data.get("cfg", 4.0)), 0), 20)
+        lora_strength = min(max(float(data.get("lora_strength", -1)), 0), 2)
     except (ValueError, TypeError):
         _release_busy()
         return jsonify({"error": "Invalid width, height, steps, or cfg value"}), 400
 
     width, height = _validate_resolution(width, height)
+
+    # Use per-request strength, or fall back to the stored LoRA default
+    if lora_strength < 0:
+        lora_strength = _current_lora["strength"] if _current_lora else 1.0
 
     try:
         with _lock:
@@ -568,7 +591,7 @@ def generate():
 
             try:
                 with torch.inference_mode():
-                    result = _flux_pipe(
+                    pipe_kwargs = dict(
                         prompt=prompt,
                         height=height,
                         width=width,
@@ -577,7 +600,10 @@ def generate():
                         generator=generator,
                         callback_on_step_end=_on_step,
                         callback_on_step_end_tensor_inputs=["latents"],
-                    ).images[0]
+                    )
+                    if _current_lora:
+                        pipe_kwargs["attention_kwargs"] = {"scale": lora_strength}
+                    result = _flux_pipe(**pipe_kwargs).images[0]
             except Exception:
                 logger.exception("[Hydra] Generation failed")
                 _broadcast("error", {"message": "Generation failed"}, priority=True)
@@ -625,9 +651,13 @@ def edit_image():
 
     try:
         edit_steps = min(max(int(data.get("steps", 50)), 1), 100)
+        lora_strength = min(max(float(data.get("lora_strength", -1)), 0), 2)
     except (ValueError, TypeError):
         _release_busy()
         return jsonify({"error": "Invalid steps value"}), 400
+
+    if lora_strength < 0:
+        lora_strength = _current_lora["strength"] if _current_lora else 1.0
 
     try:
         with _lock:
@@ -653,7 +683,7 @@ def edit_image():
 
             try:
                 with torch.inference_mode():
-                    result = _flux_pipe(
+                    pipe_kwargs = dict(
                         image=[source],
                         prompt=instruction,
                         num_inference_steps=edit_steps,
@@ -663,7 +693,10 @@ def edit_image():
                         ),
                         callback_on_step_end=_on_edit_step,
                         callback_on_step_end_tensor_inputs=["latents"],
-                    ).images[0]
+                    )
+                    if _current_lora:
+                        pipe_kwargs["attention_kwargs"] = {"scale": lora_strength}
+                    result = _flux_pipe(**pipe_kwargs).images[0]
             except Exception:
                 logger.exception("[Hydra] Edit failed")
                 _broadcast("error", {"message": "Edit failed"}, priority=True)
